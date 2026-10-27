@@ -1,6 +1,5 @@
 extern crate bincode;
 extern crate pyo3;
-extern crate statrs;
 extern crate sylph;
 
 use std::io::Read;
@@ -19,9 +18,10 @@ use pyo3::types::PyDict;
 use pyo3::types::PyList;
 use pyo3::types::PyString;
 use pyo3::types::PyType;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
 use rayon::prelude::*;
 
-mod exports;
 mod pyfile;
 
 // --- Base --------------------------------------------------------------------
@@ -736,11 +736,11 @@ impl Sketcher {
             let kmer_pair = if seq.len() > 0 {
                 None
             } else {
-                self::exports::sketch::pair_kmer_single(seq)
+                sylph::sketch::pair_kmer_single(seq)
             };
             sylph::sketch::extract_markers(&seq, &mut vec, slf.c, slf.k);
             for km in vec {
-                self::exports::sketch::dup_removal_lsh_full_exact(
+                sylph::sketch::dup_removal_lsh_full_exact(
                     &mut kmer_map,
                     &mut kmer_to_pair_table,
                     &km,
@@ -808,6 +808,7 @@ impl Sketcher {
                     .initial_capacity(1_000_000_0)
                     .false_positive_probability(x)
                     .hasher(fxhash::FxHasher::default())
+                    .rng(SmallRng::seed_from_u64(sylph::constants::DEFAULT_RNG_SEED))
                     .finish(),
             ),
         };
@@ -824,7 +825,7 @@ impl Sketcher {
 
             sylph::sketch::extract_markers(&seq1, &mut vec1, slf.c, slf.k);
             sylph::sketch::extract_markers(&seq2, &mut vec2, slf.c, slf.k);
-            let kmer_pair = self::exports::sketch::pair_kmer(&seq1, &seq2);
+            let kmer_pair = sylph::sketch::pair_kmer(&seq1, &seq2);
 
             //moving average
             counter += 1;
@@ -832,7 +833,7 @@ impl Sketcher {
 
             for km in vec1.iter() {
                 if let Some(mut approx) = kmer_pair_set_approx.as_mut() {
-                    self::exports::sketch::dup_removal_lsh_full(
+                    sylph::sketch::dup_removal_lsh_full(
                         &mut kmer_map,
                         &mut approx,
                         km,
@@ -841,7 +842,7 @@ impl Sketcher {
                         !slf.deduplicate,
                     );
                 } else {
-                    self::exports::sketch::dup_removal_lsh_full_exact(
+                    sylph::sketch::dup_removal_lsh_full_exact(
                         &mut kmer_map,
                         &mut kmer_pair_set,
                         km,
@@ -857,7 +858,7 @@ impl Sketcher {
                     continue;
                 }
                 if let Some(mut approx) = kmer_pair_set_approx.as_mut() {
-                    self::exports::sketch::dup_removal_lsh_full(
+                    sylph::sketch::dup_removal_lsh_full(
                         &mut kmer_map,
                         &mut approx,
                         km,
@@ -866,7 +867,7 @@ impl Sketcher {
                         !slf.deduplicate,
                     );
                 } else {
-                    self::exports::sketch::dup_removal_lsh_full_exact(
+                    sylph::sketch::dup_removal_lsh_full_exact(
                         &mut kmer_map,
                         &mut kmer_pair_set,
                         km,
@@ -897,13 +898,59 @@ impl Sketcher {
 
 // --- Functions ---------------------------------------------------------------
 
+/// Check that the database and sample sketches can be compared.
+///
+/// ``sylph`` terminates the process when this does not hold, so make
+/// sure to raise a Python exception before reaching that point.
+fn check_compatible(database: &Database, sample: &SampleSketch) -> PyResult<()> {
+    for genome in database.sketches.iter() {
+        if genome.k != sample.sketch.k {
+            return Err(PyValueError::new_err(format!(
+                "k parameter for sample ({}) != k parameter for genome {} ({})",
+                sample.sketch.k, genome.file_name, genome.k,
+            )));
+        }
+        if genome.c < sample.sketch.c {
+            return Err(PyValueError::new_err(format!(
+                "c parameter for sample ({}) > c parameter for genome {} ({})",
+                sample.sketch.c, genome.file_name, genome.c,
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A ``sylph`` profiler.
+///
+/// Arguments:
+///     database (`~pysylph.Database`): The database of genome sketches to
+///         profile samples against.
+///     minimum_ani (`float`, *optional*): The minimum adjusted ANI to
+///         consider (0-100). Defaults to 90 for `Profiler.query` and 95
+///         for `Profiler.profile`.
+///     seq_id (`float`, *optional*): The sequence identity (%) of the
+///         reads, only used with ``estimate_unknown``. Overrides the
+///         automatic detection.
+///     estimate_unknown (`bool`): Estimate the true coverage and scale the
+///         sequence abundance by the estimated unknown sequence percentage.
+///     min_number_kmers (`int`): Discard genomes with fewer than this many
+///         sampled k-mers. The default was lowered from 50 to 10 in
+///         ``sylph`` v1.0.0.
+///     min_contain (`int`): Discard genomes with fewer than this many
+///         contained k-mers. Introduced in ``sylph`` v1.0.0.
+///
+/// Raises:
+///     `ValueError`: When ``minimum_ani`` is out of range. The `query`
+///         and `profile` methods also raise it when the sample sketch is
+///         incompatible with a genome of the database (different ``k``,
+///         or sample ``c`` greater than the genome ``c``).
 #[pyclass(module = "pysylph.lib", frozen)]
 pub struct Profiler {
     minimum_ani: Option<f64>,
     seq_id: Option<f64>,
     estimate_unknown: bool,
     min_number_kmers: usize,
+    min_contain: usize,
     #[pyo3(get)]
     database: Py<Database>,
 }
@@ -911,13 +958,14 @@ pub struct Profiler {
 #[pymethods]
 impl Profiler {
     #[new]
-    #[pyo3(signature = (database, *, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 50))]
+    #[pyo3(signature = (database, *, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7))]
     pub fn __new__<'py>(
         database: Py<Database>,
         minimum_ani: Option<f64>,
         seq_id: Option<f64>,
         estimate_unknown: bool,
         min_number_kmers: usize,
+        min_contain: usize,
     ) -> PyResult<Self> {
         if let Some(m) = minimum_ani {
             if m < 0.0 || m > 100.0 {
@@ -933,6 +981,7 @@ impl Profiler {
             estimate_unknown,
             seq_id,
             min_number_kmers,
+            min_contain,
         })
     }
 
@@ -949,44 +998,20 @@ impl Profiler {
     fn query<'py>(&self, sample: PyRef<'py, SampleSketch>) -> PyResult<Vec<Py<AniResult>>> {
         let py = sample.py();
         let database = self.database.bind(py).borrow();
-        let args = sylph::cmdline::ContainArgs {
-            minimum_ani: self.minimum_ani,
-            files: Default::default(),
-            file_list: Default::default(),
-            min_count_correct: 3.0,
-            min_number_kmers: self.min_number_kmers as f64,
-            threads: 3,
-            sample_threads: None,
-            trace: false,
-            debug: false,
-            estimate_unknown: self.estimate_unknown,
-            seq_id: self.seq_id,
-            redundant_ani: 99.0,
-            first_pair: Default::default(),
-            second_pair: Default::default(),
-            c: 200,
-            k: 3,
-            individual: false,
-            min_spacing_kmer: 30,
-            out_file_name: None,
-            log_reassignments: false,
-            pseudotax: false,
-            ratio: false,
-            mme: false,
-            mle: false,
-            nb: false,
-            no_ci: false,
-            no_adj: false,
-            mean_coverage: false,
-            estimate_read_counts: false,
-            reads: Default::default(),
-        };
+        check_compatible(&database, &sample)?;
+        let mut args = sylph::cmdline::ContainArgs::from_cli_defaults(false);
+        args.minimum_ani = self.minimum_ani;
+        args.min_number_kmers = self.min_number_kmers as f64;
+        args.min_contain = self.min_contain;
+        args.estimate_unknown = self.estimate_unknown;
+        args.seq_id = self.seq_id;
+        args.no_sketch_pipeline = true;
 
         // estimate sample kmer identity
         let kmer_id_opt = if let Some(x) = args.seq_id {
             Some(x.powf(sample.sketch.k as f64))
         } else {
-            self::exports::contain::get_kmer_identity(&sample.sketch, args.estimate_unknown)
+            sylph::contain::get_kmer_identity(&sample.sketch, args.estimate_unknown)
         };
 
         // extract all matching kmers
@@ -996,13 +1021,13 @@ impl Profiler {
             database_sketches
                 .par_iter()
                 .flat_map_iter(|sketch| {
-                    self::exports::contain::get_stats(&args, &sketch, &sample_sketch, None, false)
+                    sylph::contain::get_stats(&args, &sketch, &sample_sketch, None, false)
                 })
                 .collect::<Vec<_>>()
         });
 
         // estimate true coverage
-        self::exports::contain::estimate_true_cov(
+        sylph::contain::estimate_true_cov(
             &mut stats,
             kmer_id_opt,
             args.estimate_unknown,
@@ -1054,44 +1079,20 @@ impl Profiler {
     fn profile<'py>(&self, sample: PyRef<'py, SampleSketch>) -> PyResult<Vec<Py<ProfileResult>>> {
         let py = sample.py();
         let database = self.database.bind(py).borrow();
-        let args = sylph::cmdline::ContainArgs {
-            minimum_ani: self.minimum_ani,
-            files: Default::default(),
-            file_list: Default::default(),
-            min_count_correct: 3.0,
-            min_number_kmers: self.min_number_kmers as f64,
-            threads: 3,
-            sample_threads: None,
-            trace: false,
-            debug: false,
-            estimate_unknown: self.estimate_unknown,
-            seq_id: self.seq_id,
-            redundant_ani: 99.0,
-            first_pair: Default::default(),
-            second_pair: Default::default(),
-            c: 200,
-            k: 3,
-            individual: false,
-            min_spacing_kmer: 30,
-            out_file_name: None,
-            log_reassignments: false,
-            pseudotax: true,
-            ratio: false,
-            mme: false,
-            mle: false,
-            nb: false,
-            no_ci: false,
-            no_adj: false,
-            mean_coverage: false,
-            estimate_read_counts: false,
-            reads: Default::default(),
-        };
+        check_compatible(&database, &sample)?;
+        let mut args = sylph::cmdline::ContainArgs::from_cli_defaults(true);
+        args.minimum_ani = self.minimum_ani;
+        args.min_number_kmers = self.min_number_kmers as f64;
+        args.min_contain = self.min_contain;
+        args.estimate_unknown = self.estimate_unknown;
+        args.seq_id = self.seq_id;
+        args.no_sketch_pipeline = true;
 
         // estimate sample kmer identity
         let kmer_id_opt = if let Some(x) = args.seq_id {
             Some(x.powf(sample.sketch.k as f64))
         } else {
-            self::exports::contain::get_kmer_identity(&sample.sketch, args.estimate_unknown)
+            sylph::contain::get_kmer_identity(&sample.sketch, args.estimate_unknown)
         };
 
         // extract all matching kmers
@@ -1101,13 +1102,13 @@ impl Profiler {
             database_sketches
                 .par_iter()
                 .flat_map_iter(|sketch| {
-                    self::exports::contain::get_stats(&args, &sketch, &sample_sketch, None, false)
+                    sylph::contain::get_stats(&args, &sketch, &sample_sketch, None, false)
                 })
                 .collect::<Vec<_>>()
         });
 
         // estimate true coverage
-        self::exports::contain::estimate_true_cov(
+        sylph::contain::estimate_true_cov(
             &mut stats,
             kmer_id_opt,
             args.estimate_unknown,
@@ -1117,12 +1118,12 @@ impl Profiler {
 
         if true {
             // reassign k-mers
-            let winner_map = self::exports::contain::winner_table(&stats, false);
+            let winner_map = sylph::contain::winner_table(&stats, false);
             let remaining_stats = stats
                 .iter()
                 .map(|x| x.genome_sketch)
                 .flat_map(|genome_sketch| {
-                    self::exports::contain::get_stats(
+                    sylph::contain::get_stats(
                         &args,
                         &genome_sketch,
                         &sample.sketch,
@@ -1131,13 +1132,13 @@ impl Profiler {
                     )
                 })
                 .collect();
-            stats = self::exports::contain::derep_if_reassign_threshold(
+            stats = sylph::contain::derep_if_reassign_threshold(
                 &stats,
                 remaining_stats,
                 args.redundant_ani,
                 sample.sketch.k,
             );
-            self::exports::contain::estimate_true_cov(
+            sylph::contain::estimate_true_cov(
                 &mut stats,
                 kmer_id_opt,
                 args.estimate_unknown,
@@ -1148,7 +1149,7 @@ impl Profiler {
             // estimate unknown if needed
             let mut bases_explained = 1.;
             if args.estimate_unknown {
-                bases_explained = self::exports::contain::estimate_covered_bases(
+                bases_explained = sylph::contain::estimate_covered_bases(
                     &stats,
                     &sample.sketch,
                     sample.sketch.mean_read_length,

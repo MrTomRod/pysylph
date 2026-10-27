@@ -93,10 +93,11 @@ class Profiler:
         self,
         database: Database,
         *,
-        minimum_ani: Optional[float],
-        seq_id: Optional[float],
+        minimum_ani: Optional[float] = None,
+        seq_id: Optional[float] = None,
         estimate_unknown: bool = False,
-        min_number_kmers: int = 50,
+        min_number_kmers: int = 10,
+        min_contain: int = 7,
     ) -> None: ...
     def query(self, sample: SampleSketch) -> List[AniResult]: ...
     def profile(self, sample: SampleSketch) -> List[ProfileResult]: ...

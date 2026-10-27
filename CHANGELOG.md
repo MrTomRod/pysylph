@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [Unreleased]
 [Unreleased]: https://github.com/althonos/pysylph/compare/v0.1.3...HEAD
 
+### Added
+- `min_contain` keyword argument to `Profiler` (default: 7), the minimum
+  number of contained k-mers required to report a genome, as in `sylph` v1.0.0.
+
+### Changed
+- Update `sylph` to `v1.0.0` (via a fork exposing its API, replacing the
+  vendored copy of `sylph` internals).
+- Default of `Profiler.min_number_kmers` lowered from 50 to 10 to match `sylph` v1.0.0.
+- `Profiler.query` and `Profiler.profile` now raise `ValueError` when the sample
+  was sketched with a different `k` than a database genome, or with a `c` greater
+  than a database genome, instead of terminating the process.
+- Read deduplication filter and bootstrap confidence intervals are now seeded
+  as in `sylph` v1.0.0, making results reproducible.
+
 
 ## [v0.1.3] - 2026-09-01
 [v0.1.3]: https://github.com/althonos/pysylph/compare/v0.1.2...v0.1.3

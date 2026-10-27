@@ -20,19 +20,18 @@ doctest = false
 pyo3 = "0.29.0"
 bincode = "1"
 fxhash = "0"
-statrs = "0.16"
-fastrand = "2"
 rayon = "1"
 scalable_cuckoo_filter = "0.2"
+rand = { version = "0.8", features = ["small_rng"] }
 
 [dependencies.serde]
 features = ["rc"]
 version = "1.0"
 
 [dependencies.sylph]
-version = "0.9.0"
-git = "https://github.com/bluenote-1577/sylph"
-tag = "v0.9.0"
+version = "1.0.0"
+git = "https://github.com/MrTomRod/sylph"
+tag = "v1.0.0-pub.1"
 # path = "vendor/sylph"
 
 [features]
