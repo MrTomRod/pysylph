@@ -693,6 +693,12 @@ pub struct AniResult {
     final_est_ani: f64,
     naive_ani: f64,
     final_est_cov: f64,
+    mean_cov: f64,
+    median_cov: f64,
+    containment_index: (usize, usize),
+    lambda: sylph::types::AdjustStatus,
+    ani_ci: (Option<f64>, Option<f64>),
+    lambda_ci: (Option<f64>, Option<f64>),
     genome: Py<GenomeSketch>,
 }
 
@@ -727,9 +733,84 @@ impl AniResult {
     }
 
     /// `float`: An estimate of the effective, or the true coverage.
+    ///
+    /// This is the ``Eff_cov`` column of ``sylph``, or the ``True_cov`` column
+    /// when the `Profiler` was created with ``estimate_unknown=True``.
     #[getter]
     fn coverage<'py>(slf: PyRef<'py, Self>) -> f64 {
         slf.final_est_cov
+    }
+
+    /// `tuple` of `float`, or `None`: The 5-95 percentile confidence interval
+    /// of the adjusted ANI, as percentages.
+    ///
+    /// This is `None` when the interval could not be computed (``NA-NA`` in
+    /// the ``sylph`` output).
+    #[getter]
+    fn ani_ci<'py>(slf: PyRef<'py, Self>) -> Option<(f64, f64)> {
+        match slf.ani_ci {
+            (Some(low), Some(high)) => Some((low * 100.0, high * 100.0)),
+            _ => None,
+        }
+    }
+
+    /// `float`, or `None`: The effective k-mer coverage lambda estimated by
+    /// the Poisson model (``Eff_lambda``).
+    ///
+    /// This is `None` when the estimate is out of the supported range; see
+    /// `AniResult.lambda_status` for the reason.
+    #[getter]
+    fn effective_lambda<'py>(slf: PyRef<'py, Self>) -> Option<f64> {
+        match slf.lambda {
+            sylph::types::AdjustStatus::Lambda(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    /// `str`: The status of the lambda estimate.
+    ///
+    /// One of ``"OK"`` when `AniResult.effective_lambda` is available, or
+    /// ``"HIGH"`` or ``"LOW"`` when the coverage was too high or too low to
+    /// be estimated (as printed in the ``Eff_lambda`` column of ``sylph``).
+    #[getter]
+    fn lambda_status<'py>(slf: PyRef<'py, Self>) -> &'static str {
+        match slf.lambda {
+            sylph::types::AdjustStatus::Lambda(_) => "OK",
+            sylph::types::AdjustStatus::High => "HIGH",
+            sylph::types::AdjustStatus::Low => "LOW",
+        }
+    }
+
+    /// `tuple` of `float`, or `None`: The 5-95 percentile confidence interval
+    /// of the effective lambda (``Lambda_5-95_percentile``).
+    ///
+    /// This is `None` when the interval could not be computed.
+    #[getter]
+    fn lambda_ci<'py>(slf: PyRef<'py, Self>) -> Option<(f64, f64)> {
+        match slf.lambda_ci {
+            (Some(low), Some(high)) => Some((low, high)),
+            _ => None,
+        }
+    }
+
+    /// `float`: The median k-mer coverage of the genome (``Median_cov``).
+    #[getter]
+    fn median_coverage<'py>(slf: PyRef<'py, Self>) -> f64 {
+        slf.median_cov
+    }
+
+    /// `float`: The mean k-mer coverage over the covered k-mers, i.e. those
+    /// with a coverage of at least one (``Mean_cov_geq1``).
+    #[getter]
+    fn mean_coverage<'py>(slf: PyRef<'py, Self>) -> f64 {
+        slf.mean_cov
+    }
+
+    /// `tuple` of `int`: The number of genome k-mers found in the sample, and
+    /// the total number of genome k-mers (``Containment_ind``).
+    #[getter]
+    fn containment<'py>(slf: PyRef<'py, Self>) -> (usize, usize) {
+        slf.containment_index
     }
 }
 
@@ -1194,6 +1275,12 @@ struct Hit {
     final_est_ani: f64,
     naive_ani: f64,
     final_est_cov: f64,
+    mean_cov: f64,
+    median_cov: f64,
+    containment_index: (usize, usize),
+    lambda: sylph::types::AdjustStatus,
+    ani_ci: (Option<f64>, Option<f64>),
+    lambda_ci: (Option<f64>, Option<f64>),
     rel_abund: Option<f64>,
     seq_abund: Option<f64>,
     kmers_lost: Option<usize>,
@@ -1210,6 +1297,16 @@ impl Hit {
             final_est_ani: result.final_est_ani,
             naive_ani: result.naive_ani,
             final_est_cov: result.final_est_cov,
+            mean_cov: result.mean_cov,
+            median_cov: result.median_cov,
+            containment_index: result.containment_index,
+            lambda: match result.lambda {
+                sylph::types::AdjustStatus::Lambda(x) => sylph::types::AdjustStatus::Lambda(x),
+                sylph::types::AdjustStatus::High => sylph::types::AdjustStatus::High,
+                sylph::types::AdjustStatus::Low => sylph::types::AdjustStatus::Low,
+            },
+            ani_ci: result.ani_ci,
+            lambda_ci: result.lambda_ci,
             rel_abund: result.rel_abund,
             seq_abund: result.seq_abund,
             kmers_lost: result.kmers_lost,
@@ -1227,6 +1324,12 @@ impl Hit {
                 final_est_ani: self.final_est_ani,
                 naive_ani: self.naive_ani,
                 final_est_cov: self.final_est_cov,
+                mean_cov: self.mean_cov,
+                median_cov: self.median_cov,
+                containment_index: self.containment_index,
+                lambda: self.lambda,
+                ani_ci: self.ani_ci,
+                lambda_ci: self.lambda_ci,
                 genome,
             }),
         )
@@ -1254,6 +1357,12 @@ impl Hit {
                 final_est_ani: self.final_est_ani,
                 naive_ani: self.naive_ani,
                 final_est_cov: self.final_est_cov,
+                mean_cov: self.mean_cov,
+                median_cov: self.median_cov,
+                containment_index: self.containment_index,
+                lambda: self.lambda,
+                ani_ci: self.ani_ci,
+                lambda_ci: self.lambda_ci,
                 genome,
             })
             .add_subclass(profile),

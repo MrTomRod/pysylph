@@ -305,6 +305,13 @@ class TestTwoStageProfiler(_TwoStageTestCase):
         self.assertAlmostEqual(results[0].sequence_abundance, 100.0, places=2)
         self.assertAlmostEqual(results[0].taxonomic_abundance, 100.0, places=2)
         self.assertEqual(results[0].kmers_reassigned, 0)
+        self.assertAlmostEqual(results[0].ani_ci[0], 99.64, places=2)
+        self.assertAlmostEqual(results[0].ani_ci[1], 99.95, places=2)
+        self.assertAlmostEqual(results[0].effective_lambda, 0.360, places=3)
+        self.assertAlmostEqual(results[0].lambda_ci[0], 0.34, places=2)
+        self.assertAlmostEqual(results[0].lambda_ci[1], 0.38, places=2)
+        self.assertAlmostEqual(results[0].mean_coverage, 1.187, places=3)
+        self.assertEqual(results[0].containment, (6208, 21899))
 
     def test_profile_estimate_unknown(self):
         # sylph profile ecoli.syl2db k12.paired.sylsp -u

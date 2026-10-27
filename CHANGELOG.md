@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 [Unreleased]: https://github.com/althonos/pysylph/compare/v0.1.3...HEAD
 
 ### Added
+- `AniResult` properties `ani_ci`, `effective_lambda`, `lambda_status`,
+  `lambda_ci`, `median_coverage`, `mean_coverage` and `containment`, exposing
+  the remaining columns of the `sylph query` and `sylph profile` output.
 - `min_contain` keyword argument to `Profiler` (default: 7), the minimum
   number of contained k-mers required to report a genome, as in `sylph` v1.0.0.
 - `TwoStageDatabase` class to load, build (from a `Database`) and dump the

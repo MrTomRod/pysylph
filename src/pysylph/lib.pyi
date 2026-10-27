@@ -1,7 +1,7 @@
 import abc
 import typing
 from os import PathLike
-from typing import List, Optional, Sequence, Sized, Iterable, Iterator, BinaryIO, Union
+from typing import List, Optional, Sequence, Tuple, Sized, Iterable, Iterator, BinaryIO, Union
 
 try:
     from typing import Literal
@@ -89,6 +89,20 @@ class AniResult:
     def ani_naive(self) -> float: ...
     @property
     def coverage(self) -> float: ...
+    @property
+    def ani_ci(self) -> Optional[Tuple[float, float]]: ...
+    @property
+    def effective_lambda(self) -> Optional[float]: ...
+    @property
+    def lambda_status(self) -> Literal["OK", "HIGH", "LOW"]: ...
+    @property
+    def lambda_ci(self) -> Optional[Tuple[float, float]]: ...
+    @property
+    def median_coverage(self) -> float: ...
+    @property
+    def mean_coverage(self) -> float: ...
+    @property
+    def containment(self) -> Tuple[int, int]: ...
 
 class ProfileResult(AniResult):
     @property

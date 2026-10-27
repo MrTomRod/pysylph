@@ -58,6 +58,110 @@ class TestProfiler(unittest.TestCase):
         self.assertAlmostEqual(results[0].taxonomic_abundance, 100.0, places=2)
         self.assertAlmostEqual(results[0].kmers_reassigned, 0)
 
+    def test_fields_query(self):
+        # expected values from `sylph query ecoli.syldb o157.sylsp`
+        results = Profiler(self.db).query(self.sample)
+        expected = [
+            # contig, ani_ci, lambda, lambda_ci, mean_cov, containment
+            ("NZ_CP017438.1 Escherichia coli O157:H7 strain 2159 chromosome, complete genome",
+             (99.64, 99.95), 0.360, (0.34, 0.38), 1.187, (6208, 21899)),
+            ("NZ_CP016182.2 Escherichia coli strain EC590 chromosome, complete genome",
+             (98.05, 98.58), 0.319, (0.29, 0.35), 1.172, (3122, 19330)),
+            ("NC_007779.1 Escherichia coli str. K-12 substr. W3110, complete sequence",
+             (97.91, 98.47), 0.327, (0.30, 0.36), 1.171, (3114, 19485)),
+        ]
+        self.assertEqual(len(results), len(expected))
+        for result, (contig, ani_ci, lam, lam_ci, mean_cov, containment) in zip(results, expected):
+            self.assertEqual(result.genome_sketch.description, contig)
+            self.assertEqual(len(result.ani_ci), 2)
+            self.assertAlmostEqual(result.ani_ci[0], ani_ci[0], places=2)
+            self.assertAlmostEqual(result.ani_ci[1], ani_ci[1], places=2)
+            self.assertEqual(result.lambda_status, "OK")
+            self.assertAlmostEqual(result.effective_lambda, lam, places=3)
+            self.assertAlmostEqual(result.lambda_ci[0], lam_ci[0], places=2)
+            self.assertAlmostEqual(result.lambda_ci[1], lam_ci[1], places=2)
+            self.assertAlmostEqual(result.median_coverage, 1.0)
+            self.assertAlmostEqual(result.mean_coverage, mean_cov, places=3)
+            self.assertEqual(result.containment, containment)
+            # without `-u`, the coverage is the effective lambda
+            self.assertAlmostEqual(result.coverage, lam, places=3)
+
+    def test_fields_profile(self):
+        # expected values from `sylph profile ecoli.syldb o157.sylsp`
+        (result,) = Profiler(self.db).profile(self.sample)
+        self.assertEqual(
+            result.genome_sketch.description,
+            "NZ_CP017438.1 Escherichia coli O157:H7 strain 2159 chromosome, complete genome",
+        )
+        self.assertAlmostEqual(result.ani_ci[0], 99.64, places=2)
+        self.assertAlmostEqual(result.ani_ci[1], 99.95, places=2)
+        self.assertEqual(result.lambda_status, "OK")
+        self.assertAlmostEqual(result.effective_lambda, 0.360, places=3)
+        self.assertAlmostEqual(result.lambda_ci[0], 0.34, places=2)
+        self.assertAlmostEqual(result.lambda_ci[1], 0.38, places=2)
+        self.assertAlmostEqual(result.median_coverage, 1.0)
+        self.assertAlmostEqual(result.mean_coverage, 1.187, places=3)
+        self.assertEqual(result.containment, (6208, 21899))
+
+    def test_fields_estimate_unknown(self):
+        # expected values from `sylph query|profile -u ecoli.syldb o157.sylsp`:
+        # `Eff_cov` becomes `True_cov`, but lambda is unchanged
+        profiler = Profiler(self.db, estimate_unknown=True)
+        for results in (profiler.query(self.sample), profiler.profile(self.sample)):
+            self.assertAlmostEqual(results[0].coverage, 3.108, places=3)
+            self.assertAlmostEqual(results[0].effective_lambda, 0.360, places=3)
+            self.assertAlmostEqual(results[0].ani_ci[0], 99.64, places=2)
+            self.assertEqual(results[0].containment, (6208, 21899))
+        results = profiler.query(self.sample)
+        self.assertAlmostEqual(results[1].coverage, 2.758, places=3)
+        self.assertAlmostEqual(results[1].effective_lambda, 0.319, places=3)
+        self.assertAlmostEqual(results[2].coverage, 2.821, places=3)
+        self.assertAlmostEqual(results[2].effective_lambda, 0.327, places=3)
+
+    def test_fields_ci_unclamped(self):
+        # `ani` is capped at 100 but the CI is printed as-is by `sylph`:
+        # `sylph query ecoli.syldb k12.paired.sylsp` gives 96.80-100.69
+        sample = SampleSketch.load(
+            importlib.resources.files(__package__).joinpath("k12.paired.sylsp")
+        )
+        results = Profiler(self.db).query(sample)
+        self.assertEqual(len(results), 3)
+        self.assertAlmostEqual(results[0].ani, 98.89, places=2)
+        self.assertAlmostEqual(results[0].ani_ci[0], 96.80, places=2)
+        self.assertAlmostEqual(results[0].ani_ci[1], 100.69, places=2)
+        self.assertAlmostEqual(results[0].lambda_ci[0], 0.02, places=2)
+        self.assertAlmostEqual(results[0].lambda_ci[1], 0.06, places=2)
+        self.assertAlmostEqual(results[0].mean_coverage, 1.016, places=3)
+        self.assertEqual(results[0].containment, (439, 19485))
+        self.assertEqual(results[1].containment, (387, 19330))
+        self.assertEqual(results[2].containment, (265, 21899))
+
+    def test_fields_low_lambda(self):
+        # `sylph query -m 80 -M 1 --min-contain 1 ecoli.syldb k12.R1.sylsp`
+        # reports `LOW` lambdas and no confidence intervals (`NA-NA`)
+        sample = SampleSketch.load(
+            importlib.resources.files(__package__).joinpath("k12.R1.sylsp")
+        )
+        profiler = Profiler(self.db, minimum_ani=80.0, min_number_kmers=1, min_contain=1)
+        results = profiler.query(sample)
+        self.assertEqual(len(results), 3)
+        for result, ani, cov, mean_cov, containment in zip(
+            results,
+            [86.53, 86.29, 84.78],
+            [1.009, 1.010, 1.008],
+            [1.009, 1.010, 1.008],
+            [(220, 19485), (200, 19330), (131, 21899)],
+        ):
+            self.assertAlmostEqual(result.ani, ani, places=2)
+            self.assertEqual(result.lambda_status, "LOW")
+            self.assertIsNone(result.effective_lambda)
+            self.assertIsNone(result.ani_ci)
+            self.assertIsNone(result.lambda_ci)
+            self.assertAlmostEqual(result.coverage, cov, places=3)
+            self.assertAlmostEqual(result.median_coverage, 1.0)
+            self.assertAlmostEqual(result.mean_coverage, mean_cov, places=3)
+            self.assertEqual(result.containment, containment)
+
     def test_seq_id(self):
         # expected values from `sylph query|profile -u -I 99.5 ecoli.syldb o157.sylsp`
         profiler = Profiler(self.db, estimate_unknown=True, seq_id=99.5)
