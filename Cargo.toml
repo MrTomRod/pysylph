@@ -31,7 +31,7 @@ version = "1.0"
 [dependencies.sylph]
 version = "1.0.0"
 git = "https://github.com/MrTomRod/sylph"
-tag = "v1.0.0-pub.1"
+tag = "v1.0.0-pub.2"
 # path = "vendor/sylph"
 
 [features]

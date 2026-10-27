@@ -344,15 +344,6 @@ impl DatabaseFile {
 
 // --- TwoStageDatabase --------------------------------------------------------
 
-/// Where the raw bytes of a two-stage database come from, needed to dump it.
-enum TwoStageSource {
-    /// The database was built or read in memory.
-    Memory(Vec<u8>),
-    /// The database is read lazily from a file, which is kept open so that
-    /// it can still be copied if the path is removed or replaced.
-    File(std::fs::File),
-}
-
 /// Convert an I/O error raised while loading a database to a Python error.
 fn twostage_error(e: std::io::Error) -> PyErr {
     use std::io::ErrorKind;
@@ -391,7 +382,10 @@ fn guard_panic<T>(f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> 
 #[pyclass(module = "pysylph.lib", frozen)]
 pub struct TwoStageDatabase {
     db: sylph::twostage_db::TwoStageDb,
-    source: TwoStageSource,
+    /// For databases read lazily from a file: the file, kept open so that it
+    /// can still be copied if the path is removed or replaced. In-memory
+    /// databases have no handle, and are dumped from `TwoStageDb::as_bytes`.
+    file: Option<std::fs::File>,
 }
 
 #[pymethods]
@@ -470,19 +464,16 @@ impl TwoStageDatabase {
                 .map_err(twostage_error)?;
             Ok(Self {
                 db,
-                source: TwoStageSource::File(handle),
+                file: Some(handle),
             })
         } else {
             let mut reader = self::pyfile::PyFileRead::from_ref(&file)?;
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes)?;
             let db = py
-                .detach(|| guard_panic(|| sylph::twostage_db::open(&bytes[..])))
+                .detach(move || guard_panic(move || sylph::twostage_db::from_vec(bytes)))
                 .map_err(twostage_error)?;
-            Ok(Self {
-                db,
-                source: TwoStageSource::Memory(bytes),
-            })
+            Ok(Self { db, file: None })
         }
     }
 
@@ -550,25 +541,19 @@ impl TwoStageDatabase {
 
         let result = py.detach(|| {
             guard_panic(|| {
-                let genomes = sketches.iter().map(|s| (**s).clone()).collect::<Vec<_>>();
                 let mut bytes = Vec::new();
                 sylph::twostage_db::write_two_stage_db(
                     &mut bytes,
-                    &genomes,
+                    &sketches[..],
                     screen_c,
                     min_sparse_kmers,
                     min_contain,
                 )?;
-                drop(genomes);
-                let db = sylph::twostage_db::open(&bytes[..])?;
-                Ok((db, bytes))
+                sylph::twostage_db::from_vec(bytes)
             })
         });
         match result {
-            Ok((db, bytes)) => Ok(Self {
-                db,
-                source: TwoStageSource::Memory(bytes),
-            }),
+            Ok(db) => Ok(Self { db, file: None }),
             Err(e) => Err(PyValueError::new_err(format!(
                 "failed to build two-stage database: {}",
                 e
@@ -586,9 +571,9 @@ impl TwoStageDatabase {
             .to_str()?
             .to_string();
         let this: &Self = &slf;
-        py.detach(|| match &this.source {
-            TwoStageSource::Memory(bytes) => std::fs::write(&path, bytes),
-            TwoStageSource::File(src) => {
+        py.detach(|| match (this.db.as_bytes(), &this.file) {
+            (Some(bytes), _) => std::fs::write(&path, bytes),
+            (None, Some(src)) => {
                 // do not truncate the database if dumping it over itself
                 let meta = src.metadata()?;
                 if let Ok(dst) = std::fs::metadata(&path) {
@@ -607,6 +592,7 @@ impl TwoStageDatabase {
                 }
                 Ok(())
             }
+            (None, None) => unreachable!("file-backed database without a file handle"),
         })?;
         Ok(())
     }
