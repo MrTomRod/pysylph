@@ -1,7 +1,7 @@
 import abc
 import typing
 from os import PathLike
-from typing import List, Optional, Sequence, Tuple, Sized, Iterable, Iterator, BinaryIO, Union
+from typing import List, Optional, Sequence, Sized, Iterable, Iterator, BinaryIO, Tuple, Union
 
 try:
     from typing import Literal
@@ -127,7 +127,11 @@ class Sketcher:
 class Profiler:
     def __init__(
         self,
-        database: Union[Database, TwoStageDatabase],
+        database: Union[
+            Database,
+            TwoStageDatabase,
+            Sequence[Union[Database, TwoStageDatabase]],
+        ],
         *,
         minimum_ani: Optional[float] = None,
         seq_id: Optional[float] = None,
@@ -137,6 +141,12 @@ class Profiler:
         screen_ani: float = 85.0,
     ) -> None: ...
     @property
-    def database(self) -> Union[Database, TwoStageDatabase]: ...
+    def database(
+        self,
+    ) -> Union[
+        Database, TwoStageDatabase, Sequence[Union[Database, TwoStageDatabase]]
+    ]: ...
+    @property
+    def databases(self) -> Tuple[Union[Database, TwoStageDatabase], ...]: ...
     def query(self, sample: SampleSketch) -> List[AniResult]: ...
     def profile(self, sample: SampleSketch) -> List[ProfileResult]: ...

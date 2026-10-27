@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Support for `TwoStageDatabase` in `Profiler`, with a `screen_ani` keyword
   argument (default: 85) controlling the first-stage screen.
 - `Profiler.database` is now a property returning either database type.
+- `Profiler` can be given a sequence of databases, in any mix of `Database` and
+  `TwoStageDatabase`, as in `sylph profile a.syldb b.syl2db sample.sylsp`. Genomes
+  of all databases are pooled and compete in reassignment and abundance
+  estimation. All databases must share the same `k` (`ValueError` otherwise) and
+  a `UserWarning` is emitted if a genome is present in several databases.
+  `Profiler.databases` returns the tuple of databases.
 
 ### Changed
 - `AniResult` and `ProfileResult` now own their data, and genomes are matched

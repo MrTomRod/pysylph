@@ -13,12 +13,14 @@ use pyo3::exceptions::PyIndexError;
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::PyUserWarning;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::PyDict;
 use pyo3::types::PyList;
 use pyo3::types::PyString;
+use pyo3::types::PyTuple;
 use pyo3::types::PyType;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -1228,41 +1230,45 @@ impl Sketcher {
 
 // --- Functions ---------------------------------------------------------------
 
-/// Check that the database and sample sketches can be compared.
+/// Check that the databases and sample sketches can be compared.
 ///
 /// ``sylph`` terminates the process when this does not hold, so make
-/// sure to raise a Python exception before reaching that point.
-fn check_compatible(database: &ProfilerDatabase, sample: &SampleSketch) -> PyResult<()> {
-    match database {
-        ProfilerDatabase::Plain(database) => {
-            for genome in database.get().sketches.iter() {
-                if genome.k != sample.sketch.k {
-                    return Err(PyValueError::new_err(format!(
-                        "k parameter for sample ({}) != k parameter for genome {} ({})",
-                        sample.sketch.k, genome.file_name, genome.k,
-                    )));
-                }
-                if genome.c < sample.sketch.c {
-                    return Err(PyValueError::new_err(format!(
-                        "c parameter for sample ({}) > c parameter for genome {} ({})",
-                        sample.sketch.c, genome.file_name, genome.c,
-                    )));
+/// sure to raise a Python exception before reaching that point. Every
+/// database is checked, since the sample ``c`` must not exceed the ``c``
+/// of any genome (the minimum ``c`` across databases).
+fn check_compatible(databases: &[ProfilerDatabase], sample: &SampleSketch) -> PyResult<()> {
+    for database in databases {
+        match database {
+            ProfilerDatabase::Plain(database) => {
+                for genome in database.get().sketches.iter() {
+                    if genome.k != sample.sketch.k {
+                        return Err(PyValueError::new_err(format!(
+                            "k parameter for sample ({}) != k parameter for genome {} ({})",
+                            sample.sketch.k, genome.file_name, genome.k,
+                        )));
+                    }
+                    if genome.c < sample.sketch.c {
+                        return Err(PyValueError::new_err(format!(
+                            "c parameter for sample ({}) > c parameter for genome {} ({})",
+                            sample.sketch.c, genome.file_name, genome.c,
+                        )));
+                    }
                 }
             }
-        }
-        ProfilerDatabase::TwoStage(database) => {
-            let db = &database.get().db;
-            if db.k != sample.sketch.k {
-                return Err(PyValueError::new_err(format!(
-                    "k parameter for sample ({}) != k parameter for database ({})",
-                    sample.sketch.k, db.k,
-                )));
-            }
-            if db.c < sample.sketch.c {
-                return Err(PyValueError::new_err(format!(
-                    "c parameter for sample ({}) > c parameter for database ({})",
-                    sample.sketch.c, db.c,
-                )));
+            ProfilerDatabase::TwoStage(database) => {
+                let db = &database.get().db;
+                if db.k != sample.sketch.k {
+                    return Err(PyValueError::new_err(format!(
+                        "k parameter for sample ({}) != k parameter for database ({})",
+                        sample.sketch.k, db.k,
+                    )));
+                }
+                if db.c < sample.sketch.c {
+                    return Err(PyValueError::new_err(format!(
+                        "c parameter for sample ({}) > c parameter for database ({})",
+                        sample.sketch.c, db.c,
+                    )));
+                }
             }
         }
     }
@@ -1474,8 +1480,13 @@ fn run_pipeline(
 /// A ``sylph`` profiler.
 ///
 /// Arguments:
-///     database (`~pysylph.Database` or `~pysylph.TwoStageDatabase`): The
-///         database of genome sketches to profile samples against.
+///     database (`~pysylph.Database`, `~pysylph.TwoStageDatabase` or `list`
+///         of these): The database of genome sketches to profile samples
+///         against. A sequence of databases of any kind can be given, like
+///         ``sylph profile a.syldb b.syl2db sample.sylsp``: the samples are
+///         screened against each `TwoStageDatabase`, and the surviving
+///         genomes are pooled with the genomes of the plain databases, so
+///         that all of them compete for the k-mers of the sample.
 ///     minimum_ani (`float`, *optional*): The minimum adjusted ANI to
 ///         consider (0-100). Defaults to 90 for `Profiler.query` and 95
 ///         for `Profiler.profile`.
@@ -1494,12 +1505,21 @@ fn run_pipeline(
 ///         deliberately permissive, and ignored for a `Database`.
 ///
 /// Raises:
-///     `TypeError`: When ``database`` is neither a `Database` nor a
-///         `TwoStageDatabase`.
-///     `ValueError`: When ``minimum_ani`` or ``screen_ani`` is out of range.
-///         The `query` and `profile` methods also raise it when the sample
-///         sketch is incompatible with the database (different ``k``,
-///         or sample ``c`` greater than the genome ``c``).
+///     `TypeError`: When ``database`` is neither a `Database`, a
+///         `TwoStageDatabase` nor a `list` or `tuple` of them.
+///     `ValueError`: When ``minimum_ani`` or ``screen_ani`` is out of range,
+///         when ``database`` is an empty sequence, or when the databases
+///         were sketched with different ``k``. The `query` and `profile`
+///         methods also raise it when the sample sketch is incompatible
+///         with the databases (different ``k``, or sample ``c`` greater than
+///         the ``c`` of any genome).
+///
+/// Warns:
+///     `UserWarning`: When the same genome (same file name and first
+///         contig name) is found more than once in the databases.
+///
+/// .. versionchanged:: 0.2.0
+///     Accept a sequence of databases.
 #[pyclass(module = "pysylph.lib", frozen)]
 pub struct Profiler {
     minimum_ani: Option<f64>,
@@ -1508,10 +1528,12 @@ pub struct Profiler {
     min_number_kmers: usize,
     min_contain: usize,
     screen_ani: f64,
-    database: ProfilerDatabase,
+    /// the object given to the constructor, returned by `Profiler.database`
+    passed: Py<PyAny>,
+    databases: Vec<ProfilerDatabase>,
 }
 
-/// The database a profiler runs against.
+/// A database a profiler runs against.
 enum ProfilerDatabase {
     Plain(Py<Database>),
     TwoStage(Py<TwoStageDatabase>),
@@ -1530,15 +1552,9 @@ impl Profiler {
         min_contain: usize,
         screen_ani: f64,
     ) -> PyResult<Self> {
-        let database = if let Ok(db) = database.cast::<Database>() {
-            ProfilerDatabase::Plain(db.clone().unbind())
-        } else if let Ok(db) = database.cast::<TwoStageDatabase>() {
-            ProfilerDatabase::TwoStage(db.clone().unbind())
-        } else {
-            return Err(PyTypeError::new_err(
-                "expected Database or TwoStageDatabase for database",
-            ));
-        };
+        let py = database.py();
+        let databases = extract_databases(database)?;
+        check_database_params(py, &databases)?;
         if screen_ani < 0.0 || screen_ani > 100.0 {
             return Err(PyValueError::new_err(format!(
                 "invalid value for screen_ani: {}",
@@ -1555,7 +1571,8 @@ impl Profiler {
         }
         Ok(Self {
             minimum_ani,
-            database,
+            passed: database.clone().unbind(),
+            databases,
             estimate_unknown,
             seq_id,
             min_number_kmers,
@@ -1564,14 +1581,27 @@ impl Profiler {
         })
     }
 
-    /// `~pysylph.Database` or `~pysylph.TwoStageDatabase`: The database
-    /// samples are profiled against.
+    /// `~pysylph.Database`, `~pysylph.TwoStageDatabase` or `list` of these:
+    /// The database(s) samples are profiled against, exactly as given to the
+    /// constructor.
     #[getter]
     fn database<'py>(&self, py: Python<'py>) -> Py<PyAny> {
-        match &self.database {
-            ProfilerDatabase::Plain(db) => db.clone_ref(py).into_any(),
-            ProfilerDatabase::TwoStage(db) => db.clone_ref(py).into_any(),
-        }
+        self.passed.clone_ref(py)
+    }
+
+    /// `tuple` of `~pysylph.Database` or `~pysylph.TwoStageDatabase`: The
+    /// databases samples are profiled against.
+    ///
+    /// .. versionadded:: 0.2.0
+    #[getter]
+    fn databases<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(
+            py,
+            self.databases.iter().map(|db| match db {
+                ProfilerDatabase::Plain(db) => db.clone_ref(py).into_any(),
+                ProfilerDatabase::TwoStage(db) => db.clone_ref(py).into_any(),
+            }),
+        )
     }
 
     /// Run an ANI containment query for the given sample.
@@ -1617,7 +1647,7 @@ impl Profiler {
         pseudotax: bool,
         sample: &SampleSketch,
     ) -> PyResult<Vec<Hit>> {
-        check_compatible(&self.database, sample)?;
+        check_compatible(&self.databases, sample)?;
         let mut args = sylph::cmdline::ContainArgs::from_cli_defaults(pseudotax);
         args.minimum_ani = self.minimum_ani;
         args.min_number_kmers = self.min_number_kmers as f64;
@@ -1628,29 +1658,134 @@ impl Profiler {
         args.screen_ani = self.screen_ani;
         args.screen_dump = None;
 
-        match &self.database {
-            ProfilerDatabase::Plain(database) => {
-                let sketches = &database.get().sketches;
-                Ok(py.detach(|| run_pipeline(&args, sketches, &sample.sketch)))
-            }
-            ProfilerDatabase::TwoStage(database) => {
-                let database = &database.get().db;
-                Ok(py.detach(|| {
-                    // screen the database, and run the pipeline on the survivors
-                    let mut dense =
-                        sylph::contain::compute_dense_survivors(&args, database, &sample.sketch);
+        Ok(py.detach(|| {
+            // Screen the two-stage databases and collect the survivors,
+            // followed by all the genomes of the plain databases, as ``sylph``
+            // does. The pipeline runs once on the combined list, so that
+            // the genomes of all databases compete with each other.
+            let mut sketches = Vec::new();
+            for database in &self.databases {
+                if let ProfilerDatabase::TwoStage(database) = database {
+                    let mut dense = sylph::contain::compute_dense_survivors(
+                        &args,
+                        &database.get().db,
+                        &sample.sketch,
+                    );
                     // survivors are collected by parallel workers: sort them
                     // to get reproducible results
                     dense.sort_by(|a, b| {
                         (&a.file_name, &a.first_contig_name)
                             .cmp(&(&b.file_name, &b.first_contig_name))
                     });
-                    let sketches = dense.into_iter().map(Arc::new).collect::<Vec<_>>();
-                    run_pipeline(&args, &sketches, &sample.sketch)
-                }))
+                    sketches.extend(dense.into_iter().map(Arc::new));
+                }
             }
+            for database in &self.databases {
+                if let ProfilerDatabase::Plain(database) = database {
+                    sketches.extend(database.get().sketches.iter().cloned());
+                }
+            }
+            run_pipeline(&args, &sketches, &sample.sketch)
+        }))
+    }
+}
+
+/// Extract the databases given to the `Profiler` constructor.
+fn extract_databases(database: &Bound<'_, PyAny>) -> PyResult<Vec<ProfilerDatabase>> {
+    fn extract_one(item: &Bound<'_, PyAny>) -> PyResult<ProfilerDatabase> {
+        if let Ok(db) = item.cast::<Database>() {
+            Ok(ProfilerDatabase::Plain(db.clone().unbind()))
+        } else if let Ok(db) = item.cast::<TwoStageDatabase>() {
+            Ok(ProfilerDatabase::TwoStage(db.clone().unbind()))
+        } else {
+            Err(PyTypeError::new_err(
+                "expected Database, TwoStageDatabase or a sequence of them for database",
+            ))
         }
     }
+
+    let databases = if let Ok(list) = database.cast::<PyList>() {
+        list.iter().map(|x| extract_one(&x)).collect::<PyResult<Vec<_>>>()?
+    } else if let Ok(tuple) = database.cast::<PyTuple>() {
+        tuple.iter().map(|x| extract_one(&x)).collect::<PyResult<Vec<_>>>()?
+    } else {
+        vec![extract_one(database)?]
+    };
+    if databases.is_empty() {
+        return Err(PyValueError::new_err("empty sequence of databases"));
+    }
+    Ok(databases)
+}
+
+/// Check the consistency of several databases, like ``sylph`` does.
+///
+/// Raises a `ValueError` if the databases have different ``k``, and emits a
+/// `UserWarning` if some genomes appear more than once.
+fn check_database_params(py: Python<'_>, databases: &[ProfilerDatabase]) -> PyResult<()> {
+    // k must match exactly across all databases
+    let mut ks = Vec::new();
+    for database in databases {
+        match database {
+            ProfilerDatabase::Plain(db) => {
+                if let Some(first) = db.get().sketches.first() {
+                    ks.push(first.k);
+                }
+            }
+            ProfilerDatabase::TwoStage(db) => ks.push(db.get().db.k),
+        }
+    }
+    ks.sort_unstable();
+    ks.dedup();
+    if ks.len() > 1 {
+        return Err(PyValueError::new_err(format!(
+            "inconsistent k across databases: {:?}",
+            ks
+        )));
+    }
+
+    // identical genomes in several databases collide in the reassignment and
+    // dereplication steps, and lead to inconsistent results
+    if databases.len() > 1 {
+        let mut seen: std::collections::HashMap<(&str, &str), usize> = Default::default();
+        for database in databases {
+            match database {
+                ProfilerDatabase::Plain(db) => {
+                    for g in db.get().sketches.iter() {
+                        *seen
+                            .entry((g.file_name.as_str(), g.first_contig_name.as_str()))
+                            .or_insert(0) += 1;
+                    }
+                }
+                ProfilerDatabase::TwoStage(db) => {
+                    let db = &db.get().db;
+                    for g in 0..db.len() as u32 {
+                        *seen
+                            .entry((db.genome_file_name(g), db.genome_first_contig_name(g)))
+                            .or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let mut dups = seen
+            .iter()
+            .filter(|(_, &n)| n > 1)
+            .map(|(k, _)| *k)
+            .collect::<Vec<_>>();
+        if !dups.is_empty() {
+            dups.sort_unstable();
+            let message = format!(
+                "{} genome(s) appear more than once across the databases (same file name and \
+                 contig name): {:?}. This can cause inconsistent reassignment results; consider \
+                 removing the duplicates from one of the databases.",
+                dups.len(),
+                dups
+            );
+            let message = std::ffi::CString::new(message.replace('\0', ""))
+                .expect("NUL bytes were removed");
+            PyErr::warn(py, &py.get_type::<PyUserWarning>(), &message, 1)?;
+        }
+    }
+    Ok(())
 }
 
 // --- Initializer -------------------------------------------------------------

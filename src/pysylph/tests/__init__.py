@@ -1,4 +1,4 @@
-from . import test_database, test_doctest, test_sketcher, test_profiler, test_twostage
+from . import test_database, test_doctest, test_sketcher, test_profiler, test_twostage, test_multidb
 
 
 def load_tests(loader, suite, pattern):
@@ -7,4 +7,5 @@ def load_tests(loader, suite, pattern):
     suite.addTests(loader.loadTestsFromModule(test_sketcher))
     suite.addTests(loader.loadTestsFromModule(test_profiler))
     suite.addTests(loader.loadTestsFromModule(test_twostage))
+    suite.addTests(loader.loadTestsFromModule(test_multidb))
     return suite
