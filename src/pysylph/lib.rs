@@ -733,7 +733,7 @@ impl Sketcher {
             let seq = read.as_bytes();
 
             let mut vec = vec![];
-            let kmer_pair = if seq.len() > 0 {
+            let kmer_pair = if seq.len() > 400 {
                 None
             } else {
                 sylph::sketch::pair_kmer_single(seq)
