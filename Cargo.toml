@@ -31,7 +31,8 @@ version = "1.0"
 [dependencies.sylph]
 version = "1.0.0"
 git = "https://github.com/MrTomRod/sylph"
-tag = "v1.0.0-pub.2"
+# branch expose-library-api (sylph PR #93)
+rev = "4b5c2beb05312d9da9006529b12ad24ec47f0914"
 # path = "vendor/sylph"
 
 [features]
