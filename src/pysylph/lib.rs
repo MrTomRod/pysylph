@@ -201,10 +201,10 @@ impl Database {
             .import(pyo3::intern!(py, "os"))?
             .call_method1(pyo3::intern!(py, "fsdecode"), (file,))
         {
-            let path = s.cast::<PyString>()?;
-            let f = std::fs::File::open(path.to_str()?)?;
-            let reader = std::io::BufReader::new(f);
-            bincode::deserialize_from(reader)
+            let path = s.cast::<PyString>()?.to_str()?.to_string();
+            let f = std::fs::File::open(&path)?;
+            // release the GIL while decoding from a file path
+            py.detach(|| bincode::deserialize_from(std::io::BufReader::new(f)))
         } else {
             let f = self::pyfile::PyFileRead::from_ref(&file)?;
             let reader = std::io::BufReader::new(f);
@@ -651,10 +651,10 @@ impl SampleSketch {
             .import(pyo3::intern!(py, "os"))?
             .call_method1(pyo3::intern!(py, "fsdecode"), (file,))
         {
-            let path = s.cast::<PyString>()?;
-            let f = std::fs::File::open(path.to_str()?)?;
-            let reader = std::io::BufReader::new(f);
-            bincode::deserialize_from(reader)
+            let path = s.cast::<PyString>()?.to_str()?.to_string();
+            let f = std::fs::File::open(&path)?;
+            // release the GIL while decoding from a file path
+            py.detach(|| bincode::deserialize_from(std::io::BufReader::new(f)))
         } else {
             let f = self::pyfile::PyFileRead::from_ref(&file)?;
             let reader = std::io::BufReader::new(f);
