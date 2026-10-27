@@ -17,6 +17,7 @@ use pyo3::exceptions::PyUserWarning;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
+use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyList;
 use pyo3::types::PyString;
@@ -678,6 +679,97 @@ impl SampleSketch {
         }
     }
 
+    /// Load a sequence sketch from bytes.
+    ///
+    /// The bytes are expected to contain a sketch in the same format as the
+    /// one written by `SampleSketch.dump`, i.e. the format of ``.sylsp``
+    /// files. `data` may be any object supporting the buffer protocol, such
+    /// as `bytes`, `bytearray` or `memoryview`.
+    ///
+    /// Raises a `ValueError` if `data` is not a valid serialized sketch.
+    ///
+    /// Example:
+    ///     >>> import pysylph
+    ///     >>> with open("k12.R1.sylsp", "rb") as f:
+    ///     ...     data = f.read()
+    ///     >>> sketch = pysylph.SampleSketch.from_bytes(data)
+    ///     >>> sketch.kmer_counts == pysylph.SampleSketch.load("k12.R1.sylsp").kmer_counts
+    ///     True
+    ///
+    #[classmethod]
+    #[pyo3(signature = (data))]
+    fn from_bytes<'py>(cls: &Bound<'py, PyType>, data: &Bound<'py, PyAny>) -> PyResult<Py<Self>> {
+        let py = cls.py();
+        // `bytes` are immutable so they can be borrowed while the GIL is
+        // released, but other buffers have to be copied in case they get
+        // modified by another thread in the meantime.
+        let bytes = if let Ok(bytes) = data.cast::<PyBytes>() {
+            std::borrow::Cow::Borrowed(bytes.as_bytes())
+        } else {
+            let buffer = PyBuffer::<u8>::get(data)?;
+            if !buffer.is_c_contiguous() {
+                return Err(PyValueError::new_err("expected C-contiguous buffer"));
+            } else if buffer.shape().len() != 1 {
+                return Err(PyValueError::new_err("expected buffer of dimension 1"));
+            }
+            std::borrow::Cow::Owned(buffer.to_vec(py)?)
+        };
+        // release the GIL while decoding, and turn panics on malformed
+        // data (e.g. `sylph` allocating a huge k-mer map) into a `ValueError`
+        // instead of letting them propagate
+        let result = py.detach(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                bincode::deserialize::<sylph::types::SequencesSketch>(&bytes)
+            }))
+        });
+        match result {
+            Ok(Ok(sketch)) => Py::new(
+                py,
+                PyClassInitializer::from(Sketch).add_subclass(Self::from(sketch)),
+            ),
+            Ok(Err(e)) => Err(PyValueError::new_err(format!(
+                "failed to load sketch: {}",
+                e
+            ))),
+            Err(_) => Err(PyValueError::new_err("failed to load sketch: invalid data")),
+        }
+    }
+
+    /// Serialize a sequence sketch to bytes.
+    ///
+    /// The bytes are written in the same format as the one used by
+    /// `SampleSketch.dump`, i.e. the format of ``.sylsp`` files, so that they
+    /// can be loaded back with `SampleSketch.from_bytes` or
+    /// `SampleSketch.load`.
+    ///
+    /// Example:
+    ///     >>> import pysylph
+    ///     >>> sketch = pysylph.SampleSketch.load("k12.R1.sylsp")
+    ///     >>> pysylph.SampleSketch.from_bytes(sketch.to_bytes()).kmer_counts == sketch.kmer_counts
+    ///     True
+    ///
+    fn to_bytes<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, PyBytes>> {
+        let py = slf.py();
+        // borrow the sketch to release the GIL while encoding
+        let sketch = &slf.sketch;
+        let bytes = py.detach(|| serialize_sketch(sketch))?;
+        Ok(PyBytes::new(py, &bytes))
+    }
+
+    // Pickling is implemented on top of `to_bytes`/`from_bytes`, so that
+    // pickles use the same format as `.sylsp` files.
+    fn __reduce__<'py>(slf: PyRef<'py, Self>) -> PyResult<Py<PyTuple>> {
+        let py = slf.py();
+        let sketch = &slf.sketch;
+        let bytes = py.detach(|| serialize_sketch(sketch))?;
+        let data = PyBytes::new(py, &bytes);
+        // use the actual Python type, so that the pickle still unpickles
+        // to the right class if `SampleSketch` becomes subclassable
+        let cls = slf.into_pyobject(py).unwrap().into_any().get_type();
+        let from_bytes = cls.getattr(pyo3::intern!(py, "from_bytes"))?;
+        Ok(PyTuple::new(py, [from_bytes, PyTuple::new(py, [data])?.into_any()])?.unbind())
+    }
+
     /// Dump a sequence sketch to a path.
     fn dump<'py>(slf: PyRef<'py, Self>, path: PyBackedStr) -> PyResult<()> {
         let f = std::fs::File::create(&*path)?;
@@ -685,6 +777,12 @@ impl SampleSketch {
         bincode::serialize_into(f, &slf.sketch).unwrap();
         Ok(())
     }
+}
+
+/// Serialize a sequence sketch with the format used by ``sylph`` for `.sylsp`.
+fn serialize_sketch(sketch: &sylph::types::SequencesSketch) -> PyResult<Vec<u8>> {
+    bincode::serialize(sketch)
+        .map_err(|e| PyValueError::new_err(format!("failed to dump sketch: {}", e)))
 }
 
 // --- ANIResult ---------------------------------------------------------------

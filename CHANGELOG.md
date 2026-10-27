@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Support for `TwoStageDatabase` in `Profiler`, with a `screen_ani` keyword
   argument (default: 85) controlling the first-stage screen.
 - `Profiler.database` is now a property returning the first database, of either type.
+- `SampleSketch.to_bytes` and `SampleSketch.from_bytes` to serialize a sample
+  sketch to and from `bytes`, in the same format as `.sylsp` files (so that
+  `SampleSketch.load` and `SampleSketch.dump` can be used interchangeably).
+- `SampleSketch` objects can now be pickled.
 - `Profiler` can be given several databases as positional arguments
   (`Profiler(db1, db2, ...)`, or `Profiler(*databases)` for a list), in any mix
   of `Database` and `TwoStageDatabase`, as in
