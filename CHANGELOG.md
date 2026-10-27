@@ -18,9 +18,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   two-stage databases (`.syl2db`) introduced in `sylph` v1.0.0.
 - Support for `TwoStageDatabase` in `Profiler`, with a `screen_ani` keyword
   argument (default: 85) controlling the first-stage screen.
-- `Profiler.database` is now a property returning either database type.
-- `Profiler` can be given a sequence of databases, in any mix of `Database` and
-  `TwoStageDatabase`, as in `sylph profile a.syldb b.syl2db sample.sylsp`. Genomes
+- `Profiler.database` is now a property returning the first database, of either type.
+- `Profiler` can be given several databases as positional arguments
+  (`Profiler(db1, db2, ...)`, or `Profiler(*databases)` for a list), in any mix
+  of `Database` and `TwoStageDatabase`, as in
+  `sylph profile a.syldb b.syl2db sample.sylsp`. Genomes
   of all databases are pooled and compete in reassignment and abundance
   estimation. All databases must share the same `k` (`ValueError` otherwise) and
   a `UserWarning` is emitted if a genome is present in several databases.

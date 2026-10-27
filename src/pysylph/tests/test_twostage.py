@@ -394,6 +394,6 @@ class TestTwoStageProfiler(_TwoStageTestCase):
 
     def test_invalid_database(self):
         with self.assertRaises(TypeError):
-            Profiler([self.db[0]])
+            Profiler(self.db[0])
         with self.assertRaises(TypeError):
             Profiler(None)

@@ -55,18 +55,16 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
     # and reads randomly sampled from the clodf13 genome.
 
     def test_properties(self):
-        profiler = Profiler([self.ecoli, self.clodf13])
+        profiler = Profiler(self.ecoli, self.clodf13)
         self.assertEqual(profiler.databases, (self.ecoli, self.clodf13))
         self.assertIsInstance(profiler.databases, tuple)
-        profiler = Profiler((self.ecoli2, self.clodf13))
+        profiler = Profiler(self.ecoli2, self.clodf13)
         self.assertIs(profiler.databases[0], self.ecoli2)
         self.assertIs(profiler.databases[1], self.clodf13)
 
     def test_database_property(self):
-        dbs = [self.ecoli2, self.clodf13]
-        self.assertIs(Profiler(dbs).database, dbs)
-        dbs = (self.ecoli2, self.clodf13)
-        self.assertIs(Profiler(dbs).database, dbs)
+        self.assertIs(Profiler(self.ecoli2, self.clodf13).database, self.ecoli2)
+        self.assertIs(Profiler(self.clodf13, self.ecoli2).database, self.clodf13)
         self.assertIs(Profiler(self.ecoli).database, self.ecoli)
         self.assertEqual(Profiler(self.ecoli).databases, (self.ecoli,))
         self.assertIs(Profiler(self.ecoli2).database, self.ecoli2)
@@ -77,8 +75,8 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
             for kwargs in ({}, {"estimate_unknown": True}, {"minimum_ani": 98.0}):
                 with self.subTest(sample=i, **kwargs):
                     expected = Profiler(self.merged, **kwargs)
-                    actual = Profiler([self.ecoli, self.clodf13], **kwargs)
-                    reverse = Profiler([self.clodf13, self.ecoli], **kwargs)
+                    actual = Profiler(self.ecoli, self.clodf13, **kwargs)
+                    reverse = Profiler(self.clodf13, self.ecoli, **kwargs)
                     for method in ("query", "profile"):
                         e = getattr(expected, method)(sample)
                         self.assertSameResults(getattr(actual, method)(sample), e)
@@ -91,7 +89,7 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
         merged2 = TwoStageDatabase.from_database(self.merged)
         for i, sample in enumerate((self.o157, self.k12, self.mix)):
             with self.subTest(sample=i):
-                a = Profiler([self.ecoli2, self.clodf13])
+                a = Profiler(self.ecoli2, self.clodf13)
                 b = Profiler(merged2)
                 for method in ("query", "profile"):
                     self.assertSameResults(
@@ -100,7 +98,7 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
 
     def test_two_twostage_databases(self):
         clodf13_2 = TwoStageDatabase.from_database(self.clodf13)
-        profiler = Profiler([self.ecoli2, clodf13_2])
+        profiler = Profiler(self.ecoli2, clodf13_2)
         for method in ("query", "profile"):
             self.assertSameResults(
                 getattr(profiler, method)(self.mix),
@@ -113,7 +111,7 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
             [self.clodf13, self.ecoli2],
             [self.ecoli, self.clodf13],
         ):
-            results = Profiler(dbs).query(self.mix)
+            results = Profiler(*dbs).query(self.mix)
             self.assertEqual(len(results), 4)
             for result, name, ani, naive, cov in zip(
                 results,
@@ -138,7 +136,7 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
             [self.clodf13, self.ecoli2],
             [self.ecoli, self.clodf13],
         ):
-            results = Profiler(dbs).profile(self.mix)
+            results = Profiler(*dbs).profile(self.mix)
             self.assertEqual(len(results), 2)
             for result, name, ani, naive, cov, tax, seq in zip(
                 results,
@@ -158,7 +156,7 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
                 self.assertEqual(result.kmers_reassigned, 0)
 
     def test_mixed_profile_estimate_unknown(self):
-        profiler = Profiler([self.ecoli2, self.clodf13], estimate_unknown=True)
+        profiler = Profiler(self.ecoli2, self.clodf13, estimate_unknown=True)
         results = profiler.profile(self.mix)
         self.assertEqual(len(results), 2)
         self.assertAlmostEqual(results[0].taxonomic_abundance, 98.5483, places=3)
@@ -169,7 +167,7 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
     def test_mixed_o157_k12(self):
         # same as `sylph query|profile ecoli.syl2db clodf13.syldb sample`
         for dbs in ([self.ecoli2], [self.ecoli2, self.clodf13], (self.clodf13, self.ecoli2)):
-            profiler = Profiler(dbs)
+            profiler = Profiler(*dbs)
             results = profiler.query(self.o157)
             self.assertEqual(len(results), 3)
             for result, name, ani, naive, cov in zip(
@@ -200,37 +198,71 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
                 self.assertAlmostEqual(result.ani, ani, places=2)
                 self.assertAlmostEqual(result.ani_naive, naive, places=2)
 
-    def test_single_item_sequence(self):
-        for db in (self.ecoli, self.ecoli2):
-            for method in ("query", "profile"):
-                self.assertSameResults(
-                    getattr(Profiler([db]), method)(self.o157),
-                    getattr(Profiler(db), method)(self.o157),
-                )
+    def test_unpacking(self):
+        def generate():
+            yield self.ecoli2
+            yield self.clodf13
+
+        profiler = Profiler(*generate())
+        self.assertEqual(profiler.databases, (self.ecoli2, self.clodf13))
+        profiler = Profiler(*[self.ecoli, self.clodf13], estimate_unknown=True)
+        self.assertEqual(profiler.databases, (self.ecoli, self.clodf13))
+        for method in ("query", "profile"):
+            self.assertSameResults(
+                getattr(Profiler(*generate()), method)(self.mix),
+                getattr(Profiler(self.ecoli2, self.clodf13), method)(self.mix),
+            )
+
+    def test_extra_databases_keyword_only(self):
+        with self.assertRaises(TypeError):
+            Profiler(self.ecoli, self.clodf13, None)
+        with self.assertRaises(TypeError):
+            Profiler(self.ecoli, self.clodf13, 90.0)
+        profiler = Profiler(self.ecoli, self.clodf13, minimum_ani=98.0)
+        self.assertEqual(len(profiler.databases), 2)
 
     def test_no_warning(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            Profiler([self.ecoli2, self.clodf13])
+            Profiler(self.ecoli2, self.clodf13)
             Profiler(self.ecoli)
 
     def test_empty(self):
-        with self.assertRaises(ValueError):
-            Profiler([])
-        with self.assertRaises(ValueError):
-            Profiler(())
+        with self.assertRaises(TypeError):
+            Profiler()
+        with self.assertRaises(TypeError):
+            Profiler(*[])
 
     def test_invalid_database(self):
         with self.assertRaises(TypeError):
-            Profiler([self.ecoli, None])
+            Profiler(self.ecoli, None)
         with self.assertRaises(TypeError):
-            Profiler([self.ecoli, self.ecoli[0]])
+            Profiler(None, self.ecoli)
         with self.assertRaises(TypeError):
-            Profiler([[self.ecoli]])
+            Profiler(self.ecoli, self.ecoli[0])
         with self.assertRaises(TypeError):
             Profiler("ecoli.syldb")
         with self.assertRaises(TypeError):
             Profiler(iter([self.ecoli]))
+
+    def test_sequence_not_accepted(self):
+        for arg in ([self.ecoli], (self.ecoli,), [self.ecoli, self.clodf13], []):
+            with self.assertRaises(TypeError) as cm:
+                Profiler(arg)
+            self.assertIn("Profiler(*databases)", str(cm.exception))
+        with self.assertRaises(TypeError) as cm:
+            Profiler(self.ecoli, [self.clodf13])
+        self.assertIn("Profiler(*databases)", str(cm.exception))
+
+    def test_invalid_database_message(self):
+        with self.assertRaises(TypeError) as cm:
+            Profiler(self.ecoli, self.clodf13, None)
+        self.assertIn("argument 3", str(cm.exception))
+        self.assertIn("NoneType", str(cm.exception))
+        with self.assertRaises(TypeError) as cm:
+            Profiler("ecoli.syldb")
+        self.assertIn("argument 1", str(cm.exception))
+        self.assertIn("str", str(cm.exception))
 
     def test_k_mismatch(self):
         sketch = Sketcher(k=21).sketch_genome("clodf13_k21", [self.clodf13_seq])
@@ -243,9 +275,9 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
             (self.ecoli2, self.clodf13, db21),
         ):
             with self.assertRaises(ValueError):
-                Profiler(dbs)
+                Profiler(*dbs)
         # same k is fine
-        Profiler([db21])
+        Profiler(db21)
 
     def test_c_not_required_to_match(self):
         sequence = self.clodf13_seq
@@ -259,7 +291,7 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
             ([self.ecoli2, db300], 200, 250),
             ([db300, self.ecoli], 200, 250),
         ):
-            profiler = Profiler(dbs)
+            profiler = Profiler(*dbs)
             sample = Sketcher(c=ok).sketch_single("reads", [sequence])
             profiler.query(sample)
             profiler.profile(sample)
@@ -272,14 +304,14 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
     def test_sample_checks_all_databases(self):
         sample = Sketcher(c=1000).sketch_single("reads", ["ACGT" * 100])
         for dbs in ([self.ecoli, self.clodf13], [self.ecoli2, self.clodf13], [self.clodf13, self.ecoli2]):
-            profiler = Profiler(dbs)
+            profiler = Profiler(*dbs)
             with self.assertRaises(ValueError):
                 profiler.query(sample)
             with self.assertRaises(ValueError):
                 profiler.profile(sample)
         sample = Sketcher(k=21).sketch_single("reads", ["ACGT" * 100])
         with self.assertRaises(ValueError):
-            Profiler([self.ecoli2, self.clodf13]).query(sample)
+            Profiler(self.ecoli2, self.clodf13).query(sample)
 
     def test_duplicate_genomes(self):
         for dbs in (
@@ -289,12 +321,12 @@ class TestMultiDatabaseProfiler(unittest.TestCase):
             [self.ecoli, self.ecoli],
         ):
             with self.assertWarns(UserWarning) as cm:
-                Profiler(dbs)
+                Profiler(*dbs)
             self.assertIn("more than once", str(cm.warning))
             self.assertIn("e.coli-o157", str(cm.warning))
         # warns once, at construction
         with self.assertWarns(UserWarning):
-            profiler = Profiler([self.ecoli, self.ecoli2])
+            profiler = Profiler(self.ecoli, self.ecoli2)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             profiler.query(self.o157)

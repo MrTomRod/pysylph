@@ -166,19 +166,25 @@ results = profiler.profile(sample)
 ### 📚 Using several databases
 
 Like `sylph profile a.syldb b.syl2db sample.sylsp`, a `Profiler` can be given
-a list of databases, in any mix of `Database` and `TwoStageDatabase`. The
+several databases as positional arguments, in any mix of `Database` and
+`TwoStageDatabase`. The
 genomes of all databases compete with each other for the k-mers of the sample,
 which is not the same as profiling each database separately. All databases
 must have been sketched with the same `k`, and a `UserWarning` is emitted if
 the same genome is found in several of them.
 
 ```python
-databases = [
-    pysylph.Database.load("genomes.syldb"),
-    pysylph.TwoStageDatabase.load("more_genomes.syl2db"),
-]
-profiler = pysylph.Profiler(databases)
+db1 = pysylph.Database.load("genomes.syldb")
+db2 = pysylph.TwoStageDatabase.load("more_genomes.syl2db")
+profiler = pysylph.Profiler(db1, db2)
 results = profiler.profile(sample)
+```
+
+To use a list of databases, unpack it with `*`:
+
+```python
+databases = [db1, db2]
+profiler = pysylph.Profiler(*databases)
 ```
 
 ## 🔎 See Also

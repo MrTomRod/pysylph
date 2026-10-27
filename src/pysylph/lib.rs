@@ -1480,13 +1480,15 @@ fn run_pipeline(
 /// A ``sylph`` profiler.
 ///
 /// Arguments:
-///     database (`~pysylph.Database`, `~pysylph.TwoStageDatabase` or `list`
-///         of these): The database of genome sketches to profile samples
-///         against. A sequence of databases of any kind can be given, like
+///     database (`~pysylph.Database` or `~pysylph.TwoStageDatabase`): The
+///         database of genome sketches to profile samples against.
+///     *extra_databases (`~pysylph.Database` or `~pysylph.TwoStageDatabase`):
+///         Additional databases of any kind, like
 ///         ``sylph profile a.syldb b.syl2db sample.sylsp``: the samples are
 ///         screened against each `TwoStageDatabase`, and the surviving
 ///         genomes are pooled with the genomes of the plain databases, so
-///         that all of them compete for the k-mers of the sample.
+///         that all of them compete for the k-mers of the sample. Use
+///         ``Profiler(*databases)`` to give a list of databases.
 ///     minimum_ani (`float`, *optional*): The minimum adjusted ANI to
 ///         consider (0-100). Defaults to 90 for `Profiler.query` and 95
 ///         for `Profiler.profile`.
@@ -1505,11 +1507,10 @@ fn run_pipeline(
 ///         deliberately permissive, and ignored for a `Database`.
 ///
 /// Raises:
-///     `TypeError`: When ``database`` is neither a `Database`, a
-///         `TwoStageDatabase` nor a `list` or `tuple` of them.
+///     `TypeError`: When ``database`` or any of ``extra_databases`` is
+///         neither a `Database` nor a `TwoStageDatabase`.
 ///     `ValueError`: When ``minimum_ani`` or ``screen_ani`` is out of range,
-///         when ``database`` is an empty sequence, or when the databases
-///         were sketched with different ``k``. The `query` and `profile`
+///         or when the databases were sketched with different ``k``. The `query` and `profile`
 ///         methods also raise it when the sample sketch is incompatible
 ///         with the databases (different ``k``, or sample ``c`` greater than
 ///         the ``c`` of any genome).
@@ -1519,7 +1520,7 @@ fn run_pipeline(
 ///         contig name) is found more than once in the databases.
 ///
 /// .. versionchanged:: 0.2.0
-///     Accept a sequence of databases.
+///     Accept additional databases as positional arguments.
 #[pyclass(module = "pysylph.lib", frozen)]
 pub struct Profiler {
     minimum_ani: Option<f64>,
@@ -1528,8 +1529,6 @@ pub struct Profiler {
     min_number_kmers: usize,
     min_contain: usize,
     screen_ani: f64,
-    /// the object given to the constructor, returned by `Profiler.database`
-    passed: Py<PyAny>,
     databases: Vec<ProfilerDatabase>,
 }
 
@@ -1539,12 +1538,22 @@ enum ProfilerDatabase {
     TwoStage(Py<TwoStageDatabase>),
 }
 
+impl ProfilerDatabase {
+    fn to_object(&self, py: Python<'_>) -> Py<PyAny> {
+        match self {
+            ProfilerDatabase::Plain(db) => db.clone_ref(py).into_any(),
+            ProfilerDatabase::TwoStage(db) => db.clone_ref(py).into_any(),
+        }
+    }
+}
+
 #[pymethods]
 impl Profiler {
     #[new]
-    #[pyo3(signature = (database, *, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7, screen_ani = sylph::constants::SCREEN_MIN_ANI_DEFAULT))]
+    #[pyo3(signature = (database, *extra_databases, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7, screen_ani = sylph::constants::SCREEN_MIN_ANI_DEFAULT))]
     pub fn __new__<'py>(
         database: &Bound<'py, PyAny>,
+        extra_databases: &Bound<'py, PyTuple>,
         minimum_ani: Option<f64>,
         seq_id: Option<f64>,
         estimate_unknown: bool,
@@ -1553,7 +1562,7 @@ impl Profiler {
         screen_ani: f64,
     ) -> PyResult<Self> {
         let py = database.py();
-        let databases = extract_databases(database)?;
+        let databases = extract_databases(database, extra_databases)?;
         check_database_params(py, &databases)?;
         if screen_ani < 0.0 || screen_ani > 100.0 {
             return Err(PyValueError::new_err(format!(
@@ -1571,7 +1580,6 @@ impl Profiler {
         }
         Ok(Self {
             minimum_ani,
-            passed: database.clone().unbind(),
             databases,
             estimate_unknown,
             seq_id,
@@ -1581,12 +1589,11 @@ impl Profiler {
         })
     }
 
-    /// `~pysylph.Database`, `~pysylph.TwoStageDatabase` or `list` of these:
-    /// The database(s) samples are profiled against, exactly as given to the
-    /// constructor.
+    /// `~pysylph.Database` or `~pysylph.TwoStageDatabase`: The first
+    /// database samples are profiled against.
     #[getter]
     fn database<'py>(&self, py: Python<'py>) -> Py<PyAny> {
-        self.passed.clone_ref(py)
+        self.databases[0].to_object(py)
     }
 
     /// `tuple` of `~pysylph.Database` or `~pysylph.TwoStageDatabase`: The
@@ -1597,10 +1604,7 @@ impl Profiler {
     fn databases<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         PyTuple::new(
             py,
-            self.databases.iter().map(|db| match db {
-                ProfilerDatabase::Plain(db) => db.clone_ref(py).into_any(),
-                ProfilerDatabase::TwoStage(db) => db.clone_ref(py).into_any(),
-            }),
+            self.databases.iter().map(|db| db.to_object(py)),
         )
     }
 
@@ -1691,28 +1695,37 @@ impl Profiler {
 }
 
 /// Extract the databases given to the `Profiler` constructor.
-fn extract_databases(database: &Bound<'_, PyAny>) -> PyResult<Vec<ProfilerDatabase>> {
-    fn extract_one(item: &Bound<'_, PyAny>) -> PyResult<ProfilerDatabase> {
+fn extract_databases(
+    database: &Bound<'_, PyAny>,
+    extra_databases: &Bound<'_, PyTuple>,
+) -> PyResult<Vec<ProfilerDatabase>> {
+    fn extract_one(item: &Bound<'_, PyAny>, position: usize) -> PyResult<ProfilerDatabase> {
         if let Ok(db) = item.cast::<Database>() {
             Ok(ProfilerDatabase::Plain(db.clone().unbind()))
         } else if let Ok(db) = item.cast::<TwoStageDatabase>() {
             Ok(ProfilerDatabase::TwoStage(db.clone().unbind()))
         } else {
-            Err(PyTypeError::new_err(
-                "expected Database, TwoStageDatabase or a sequence of them for database",
-            ))
+            let ty = item
+                .get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "?".to_string());
+            let hint = if item.is_instance_of::<PyList>() || item.is_instance_of::<PyTuple>() {
+                "; to give several databases, use Profiler(*databases)"
+            } else {
+                ""
+            };
+            Err(PyTypeError::new_err(format!(
+                "expected Database or TwoStageDatabase for database argument {}, got {}{}",
+                position, ty, hint
+            )))
         }
     }
 
-    let databases = if let Ok(list) = database.cast::<PyList>() {
-        list.iter().map(|x| extract_one(&x)).collect::<PyResult<Vec<_>>>()?
-    } else if let Ok(tuple) = database.cast::<PyTuple>() {
-        tuple.iter().map(|x| extract_one(&x)).collect::<PyResult<Vec<_>>>()?
-    } else {
-        vec![extract_one(database)?]
-    };
-    if databases.is_empty() {
-        return Err(PyValueError::new_err("empty sequence of databases"));
+    let mut databases = Vec::with_capacity(1 + extra_databases.len());
+    databases.push(extract_one(database, 1)?);
+    for (i, item) in extra_databases.iter().enumerate() {
+        databases.push(extract_one(&item, i + 2)?);
     }
     Ok(databases)
 }

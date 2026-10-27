@@ -127,12 +127,8 @@ class Sketcher:
 class Profiler:
     def __init__(
         self,
-        database: Union[
-            Database,
-            TwoStageDatabase,
-            Sequence[Union[Database, TwoStageDatabase]],
-        ],
-        *,
+        database: Union[Database, TwoStageDatabase],
+        *extra_databases: Union[Database, TwoStageDatabase],
         minimum_ani: Optional[float] = None,
         seq_id: Optional[float] = None,
         estimate_unknown: bool = False,
@@ -141,11 +137,7 @@ class Profiler:
         screen_ani: float = 85.0,
     ) -> None: ...
     @property
-    def database(
-        self,
-    ) -> Union[
-        Database, TwoStageDatabase, Sequence[Union[Database, TwoStageDatabase]]
-    ]: ...
+    def database(self) -> Union[Database, TwoStageDatabase]: ...
     @property
     def databases(self) -> Tuple[Union[Database, TwoStageDatabase], ...]: ...
     def query(self, sample: SampleSketch) -> List[AniResult]: ...
