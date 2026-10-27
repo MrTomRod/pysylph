@@ -43,6 +43,7 @@ API Reference
 
         pysylph.Database
         pysylph.DatabaseFile
+        pysylph.TwoStageDatabase
 
 
     Profiler

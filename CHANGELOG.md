@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ### Added
 - `min_contain` keyword argument to `Profiler` (default: 7), the minimum
   number of contained k-mers required to report a genome, as in `sylph` v1.0.0.
+- `TwoStageDatabase` class to load, build (from a `Database`) and dump the
+  two-stage databases (`.syl2db`) introduced in `sylph` v1.0.0.
+- Support for `TwoStageDatabase` in `Profiler`, with a `screen_ani` keyword
+  argument (default: 85) controlling the first-stage screen.
+- `Profiler.database` is now a property returning either database type.
 
 ### Changed
 - `AniResult` and `ProfileResult` now own their data, and genomes are matched

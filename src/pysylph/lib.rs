@@ -3,6 +3,8 @@ extern crate pyo3;
 extern crate sylph;
 
 use std::io::Read;
+use std::os::unix::fs::FileExt;
+use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 
 use bincode::de::read::IoReader;
@@ -338,6 +340,276 @@ impl DatabaseFile {
     //     // println!("{:?}", d);
     //     unimplemented!()
     // }
+}
+
+// --- TwoStageDatabase --------------------------------------------------------
+
+/// Where the raw bytes of a two-stage database come from, needed to dump it.
+enum TwoStageSource {
+    /// The database was built or read in memory.
+    Memory(Vec<u8>),
+    /// The database is read lazily from a file, which is kept open so that
+    /// it can still be copied if the path is removed or replaced.
+    File(std::fs::File),
+}
+
+/// Convert an I/O error raised while loading a database to a Python error.
+fn twostage_error(e: std::io::Error) -> PyErr {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::InvalidData | ErrorKind::UnexpectedEof | ErrorKind::InvalidInput => {
+            PyValueError::new_err(format!("invalid two-stage database: {}", e))
+        }
+        _ => e.into(),
+    }
+}
+
+/// Run some ``sylph`` code, turning panics caused by malformed data into errors.
+fn guard_panic<T>(f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "malformed two-stage database",
+        ))
+    })
+}
+
+/// A two-stage sketch database.
+///
+/// Two-stage databases (``.syl2db``) were introduced in ``sylph`` v1.0.0.
+/// They store a sparse index of every genome, used to quickly screen
+/// samples, along with the dense k-mers of each genome, which are only
+/// decoded for the genomes that pass the screen. This makes profiling
+/// large databases of large genomes much faster, with little memory.
+///
+/// Use `TwoStageDatabase.from_database` to build one from a `Database`, or
+/// `TwoStageDatabase.load` to load one built with ``sylph``. Two-stage
+/// databases can be given to `Profiler` in place of a `Database`.
+///
+/// .. versionadded:: 0.2.0
+///
+#[pyclass(module = "pysylph.lib", frozen)]
+pub struct TwoStageDatabase {
+    db: sylph::twostage_db::TwoStageDb,
+    source: TwoStageSource,
+}
+
+#[pymethods]
+impl TwoStageDatabase {
+    /// `int`: The subsampling rate of the dense k-mers of each genome.
+    #[getter]
+    pub fn c(&self) -> usize {
+        self.db.c
+    }
+
+    /// `int`: The k-mer size the genomes were sketched with.
+    #[getter]
+    pub fn k(&self) -> usize {
+        self.db.k
+    }
+
+    /// `int`: The subsampling rate of the screening index.
+    ///
+    /// This can be lower than the rate requested when building the database
+    /// if small genomes needed a denser screen.
+    #[getter]
+    pub fn screen_c(&self) -> usize {
+        self.db.screen_c
+    }
+
+    pub fn __len__(&self) -> usize {
+        self.db.len()
+    }
+
+    pub fn __getitem__<'py>(slf: PyRef<'py, Self>, item: isize) -> PyResult<Py<GenomeSketch>> {
+        let py = slf.py();
+        let len = slf.db.len() as isize;
+        let index = if item < 0 { item + len } else { item };
+        if index < 0 || index >= len {
+            return Err(PyIndexError::new_err(item));
+        }
+        let this: &Self = &slf;
+        let sketch = py
+            .detach(|| guard_panic(|| this.db.decode_dense(index as u32)))
+            .map_err(twostage_error)?;
+        Py::new(
+            py,
+            PyClassInitializer::from(Sketch).add_subclass(GenomeSketch::from(sketch)),
+        )
+    }
+
+    /// Load a two-stage database.
+    ///
+    /// Arguments:
+    ///     file (`str`, `os.PathLike` or file-like handle): The path to the
+    ///         file containing the database, or a file-like object open in
+    ///         binary mode.
+    ///
+    /// When given a path, only the screening index is loaded in memory, and
+    /// the dense k-mers of genomes are read from the file when needed. When
+    /// given a file-like object, the whole database is loaded in memory.
+    ///
+    /// Raises:
+    ///     `ValueError`: When the file is not a valid two-stage database.
+    ///
+    #[classmethod]
+    #[pyo3(signature = (file))]
+    fn load<'py>(cls: &Bound<'py, PyType>, file: &Bound<'py, PyAny>) -> PyResult<Self> {
+        let py = cls.py();
+        // attempt to extract a path, or fall back to reader
+        if let Ok(s) = py
+            .import(pyo3::intern!(py, "os"))?
+            .call_method1(pyo3::intern!(py, "fsdecode"), (file,))
+        {
+            let path = s.cast::<PyString>()?.to_str()?.to_string();
+            let handle = std::fs::File::open(&path)?;
+            let db = py
+                .detach(|| {
+                    guard_panic(|| sylph::twostage_db::open_file(&path))
+                })
+                .map_err(twostage_error)?;
+            Ok(Self {
+                db,
+                source: TwoStageSource::File(handle),
+            })
+        } else {
+            let mut reader = self::pyfile::PyFileRead::from_ref(&file)?;
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            let db = py
+                .detach(|| guard_panic(|| sylph::twostage_db::open(&bytes[..])))
+                .map_err(twostage_error)?;
+            Ok(Self {
+                db,
+                source: TwoStageSource::Memory(bytes),
+            })
+        }
+    }
+
+    /// Build a two-stage database from a database of genome sketches.
+    ///
+    /// Arguments:
+    ///     database (`~pysylph.Database`): The database to convert. All of
+    ///         its sketches must have the same ``c`` and ``k``, and have been
+    ///         sketched with ``profiling=True``.
+    ///     screen_c (`int`): The subsampling rate of the screening index,
+    ///         which must be greater or equal to the ``c`` of the genomes.
+    ///     min_sparse_kmers (`int`): The minimum number of k-mers of each
+    ///         genome in the screening index. Genomes with less k-mers at the
+    ///         ``screen_c`` rate use a denser, genome-specific rate.
+    ///     min_contain (`int`): Genomes with fewer dense k-mers than this
+    ///         are dropped from the database, since they could not be
+    ///         reported by a `Profiler` with the same ``min_contain``. As a
+    ///         result, the database can have less genomes than ``database``.
+    ///
+    /// The database is built in memory.
+    ///
+    /// Raises:
+    ///     `ValueError`: When the database is empty, has inconsistent
+    ///         ``c`` or ``k``, has genomes sketched without profiling
+    ///         k-mers, or when a parameter is out of range.
+    ///
+    #[classmethod]
+    #[pyo3(signature = (database, *, screen_c = sylph::constants::SCREEN_C_DEFAULT, min_sparse_kmers = sylph::constants::SPARSE_TARGET_MIN_DEFAULT, min_contain = 7))]
+    fn from_database<'py>(
+        cls: &Bound<'py, PyType>,
+        database: &Database,
+        screen_c: usize,
+        min_sparse_kmers: usize,
+        min_contain: usize,
+    ) -> PyResult<Self> {
+        let py = cls.py();
+        let sketches = &database.sketches;
+        let first = match sketches.first() {
+            Some(first) => first,
+            None => return Err(PyValueError::new_err("cannot convert an empty database")),
+        };
+        for sketch in sketches.iter() {
+            if sketch.c != first.c || sketch.k != first.k {
+                return Err(PyValueError::new_err(format!(
+                    "inconsistent c or k in database: genome {} has c={} and k={}, but genome {} has c={} and k={}",
+                    first.file_name, first.c, first.k, sketch.file_name, sketch.c, sketch.k,
+                )));
+            }
+            if sketch.pseudotax_tracked_nonused_kmers.is_none() {
+                return Err(PyValueError::new_err(format!(
+                    "genome {} was sketched without profiling k-mers, which two-stage databases require",
+                    sketch.file_name
+                )));
+            }
+        }
+        if screen_c < first.c {
+            return Err(PyValueError::new_err(format!(
+                "screen_c ({}) must be greater or equal to the database c ({})",
+                screen_c, first.c
+            )));
+        }
+        if min_sparse_kmers < 1 {
+            return Err(PyValueError::new_err("min_sparse_kmers must be at least 1"));
+        }
+
+        let result = py.detach(|| {
+            guard_panic(|| {
+                let genomes = sketches.iter().map(|s| (**s).clone()).collect::<Vec<_>>();
+                let mut bytes = Vec::new();
+                sylph::twostage_db::write_two_stage_db(
+                    &mut bytes,
+                    &genomes,
+                    screen_c,
+                    min_sparse_kmers,
+                    min_contain,
+                )?;
+                drop(genomes);
+                let db = sylph::twostage_db::open(&bytes[..])?;
+                Ok((db, bytes))
+            })
+        });
+        match result {
+            Ok((db, bytes)) => Ok(Self {
+                db,
+                source: TwoStageSource::Memory(bytes),
+            }),
+            Err(e) => Err(PyValueError::new_err(format!(
+                "failed to build two-stage database: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Dump a two-stage database to a path.
+    fn dump<'py>(slf: PyRef<'py, Self>, path: &Bound<'py, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let path = py
+            .import(pyo3::intern!(py, "os"))?
+            .call_method1(pyo3::intern!(py, "fsdecode"), (path,))?
+            .cast::<PyString>()?
+            .to_str()?
+            .to_string();
+        let this: &Self = &slf;
+        py.detach(|| match &this.source {
+            TwoStageSource::Memory(bytes) => std::fs::write(&path, bytes),
+            TwoStageSource::File(src) => {
+                // do not truncate the database if dumping it over itself
+                let meta = src.metadata()?;
+                if let Ok(dst) = std::fs::metadata(&path) {
+                    if dst.dev() == meta.dev() && dst.ino() == meta.ino() {
+                        return Ok(());
+                    }
+                }
+                let mut dst = std::fs::File::create(&path)?;
+                let mut buffer = vec![0u8; 1 << 20];
+                let mut offset = 0u64;
+                while offset < meta.len() {
+                    let n = usize::min(buffer.len(), (meta.len() - offset) as usize);
+                    src.read_exact_at(&mut buffer[..n], offset)?;
+                    std::io::Write::write_all(&mut dst, &buffer[..n])?;
+                    offset += n as u64;
+                }
+                Ok(())
+            }
+        })?;
+        Ok(())
+    }
 }
 
 // --- SampleSketch ----------------------------------------------------------
@@ -893,19 +1165,38 @@ impl Sketcher {
 ///
 /// ``sylph`` terminates the process when this does not hold, so make
 /// sure to raise a Python exception before reaching that point.
-fn check_compatible(database: &Database, sample: &SampleSketch) -> PyResult<()> {
-    for genome in database.sketches.iter() {
-        if genome.k != sample.sketch.k {
-            return Err(PyValueError::new_err(format!(
-                "k parameter for sample ({}) != k parameter for genome {} ({})",
-                sample.sketch.k, genome.file_name, genome.k,
-            )));
+fn check_compatible(database: &ProfilerDatabase, sample: &SampleSketch) -> PyResult<()> {
+    match database {
+        ProfilerDatabase::Plain(database) => {
+            for genome in database.get().sketches.iter() {
+                if genome.k != sample.sketch.k {
+                    return Err(PyValueError::new_err(format!(
+                        "k parameter for sample ({}) != k parameter for genome {} ({})",
+                        sample.sketch.k, genome.file_name, genome.k,
+                    )));
+                }
+                if genome.c < sample.sketch.c {
+                    return Err(PyValueError::new_err(format!(
+                        "c parameter for sample ({}) > c parameter for genome {} ({})",
+                        sample.sketch.c, genome.file_name, genome.c,
+                    )));
+                }
+            }
         }
-        if genome.c < sample.sketch.c {
-            return Err(PyValueError::new_err(format!(
-                "c parameter for sample ({}) > c parameter for genome {} ({})",
-                sample.sketch.c, genome.file_name, genome.c,
-            )));
+        ProfilerDatabase::TwoStage(database) => {
+            let db = &database.get().db;
+            if db.k != sample.sketch.k {
+                return Err(PyValueError::new_err(format!(
+                    "k parameter for sample ({}) != k parameter for database ({})",
+                    sample.sketch.k, db.k,
+                )));
+            }
+            if db.c < sample.sketch.c {
+                return Err(PyValueError::new_err(format!(
+                    "c parameter for sample ({}) > c parameter for database ({})",
+                    sample.sketch.c, db.c,
+                )));
+            }
         }
     }
     Ok(())
@@ -1088,8 +1379,8 @@ fn run_pipeline(
 /// A ``sylph`` profiler.
 ///
 /// Arguments:
-///     database (`~pysylph.Database`): The database of genome sketches to
-///         profile samples against.
+///     database (`~pysylph.Database` or `~pysylph.TwoStageDatabase`): The
+///         database of genome sketches to profile samples against.
 ///     minimum_ani (`float`, *optional*): The minimum adjusted ANI to
 ///         consider (0-100). Defaults to 90 for `Profiler.query` and 95
 ///         for `Profiler.profile`.
@@ -1103,11 +1394,16 @@ fn run_pipeline(
 ///         ``sylph`` v1.0.0.
 ///     min_contain (`int`): Discard genomes with fewer than this many
 ///         contained k-mers. Introduced in ``sylph`` v1.0.0.
+///     screen_ani (`float`): The minimum adjusted ANI (0-100) for a genome
+///         to pass the first-stage screen of a `TwoStageDatabase`. This is
+///         deliberately permissive, and ignored for a `Database`.
 ///
 /// Raises:
-///     `ValueError`: When ``minimum_ani`` is out of range. The `query`
-///         and `profile` methods also raise it when the sample sketch is
-///         incompatible with a genome of the database (different ``k``,
+///     `TypeError`: When ``database`` is neither a `Database` nor a
+///         `TwoStageDatabase`.
+///     `ValueError`: When ``minimum_ani`` or ``screen_ani`` is out of range.
+///         The `query` and `profile` methods also raise it when the sample
+///         sketch is incompatible with the database (different ``k``,
 ///         or sample ``c`` greater than the genome ``c``).
 #[pyclass(module = "pysylph.lib", frozen)]
 pub struct Profiler {
@@ -1116,22 +1412,44 @@ pub struct Profiler {
     estimate_unknown: bool,
     min_number_kmers: usize,
     min_contain: usize,
-    #[pyo3(get)]
-    database: Py<Database>,
+    screen_ani: f64,
+    database: ProfilerDatabase,
+}
+
+/// The database a profiler runs against.
+enum ProfilerDatabase {
+    Plain(Py<Database>),
+    TwoStage(Py<TwoStageDatabase>),
 }
 
 #[pymethods]
 impl Profiler {
     #[new]
-    #[pyo3(signature = (database, *, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7))]
+    #[pyo3(signature = (database, *, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7, screen_ani = sylph::constants::SCREEN_MIN_ANI_DEFAULT))]
     pub fn __new__<'py>(
-        database: Py<Database>,
+        database: &Bound<'py, PyAny>,
         minimum_ani: Option<f64>,
         seq_id: Option<f64>,
         estimate_unknown: bool,
         min_number_kmers: usize,
         min_contain: usize,
+        screen_ani: f64,
     ) -> PyResult<Self> {
+        let database = if let Ok(db) = database.cast::<Database>() {
+            ProfilerDatabase::Plain(db.clone().unbind())
+        } else if let Ok(db) = database.cast::<TwoStageDatabase>() {
+            ProfilerDatabase::TwoStage(db.clone().unbind())
+        } else {
+            return Err(PyTypeError::new_err(
+                "expected Database or TwoStageDatabase for database",
+            ));
+        };
+        if screen_ani < 0.0 || screen_ani > 100.0 {
+            return Err(PyValueError::new_err(format!(
+                "invalid value for screen_ani: {}",
+                screen_ani
+            )));
+        }
         if let Some(m) = minimum_ani {
             if m < 0.0 || m > 100.0 {
                 return Err(PyValueError::new_err(format!(
@@ -1147,7 +1465,18 @@ impl Profiler {
             seq_id,
             min_number_kmers,
             min_contain,
+            screen_ani,
         })
+    }
+
+    /// `~pysylph.Database` or `~pysylph.TwoStageDatabase`: The database
+    /// samples are profiled against.
+    #[getter]
+    fn database<'py>(&self, py: Python<'py>) -> Py<PyAny> {
+        match &self.database {
+            ProfilerDatabase::Plain(db) => db.clone_ref(py).into_any(),
+            ProfilerDatabase::TwoStage(db) => db.clone_ref(py).into_any(),
+        }
     }
 
     /// Run an ANI containment query for the given sample.
@@ -1193,8 +1522,7 @@ impl Profiler {
         pseudotax: bool,
         sample: &SampleSketch,
     ) -> PyResult<Vec<Hit>> {
-        let database = self.database.bind(py).borrow();
-        check_compatible(&database, sample)?;
+        check_compatible(&self.database, sample)?;
         let mut args = sylph::cmdline::ContainArgs::from_cli_defaults(pseudotax);
         args.minimum_ani = self.minimum_ani;
         args.min_number_kmers = self.min_number_kmers as f64;
@@ -1202,9 +1530,31 @@ impl Profiler {
         args.estimate_unknown = self.estimate_unknown;
         args.seq_id = self.seq_id;
         args.no_sketch_pipeline = true;
+        args.screen_ani = self.screen_ani;
+        args.screen_dump = None;
 
-        let sketches = &database.sketches;
-        Ok(py.detach(|| run_pipeline(&args, sketches, &sample.sketch)))
+        match &self.database {
+            ProfilerDatabase::Plain(database) => {
+                let sketches = &database.get().sketches;
+                Ok(py.detach(|| run_pipeline(&args, sketches, &sample.sketch)))
+            }
+            ProfilerDatabase::TwoStage(database) => {
+                let database = &database.get().db;
+                Ok(py.detach(|| {
+                    // screen the database, and run the pipeline on the survivors
+                    let mut dense =
+                        sylph::contain::compute_dense_survivors(&args, database, &sample.sketch);
+                    // survivors are collected by parallel workers: sort them
+                    // to get reproducible results
+                    dense.sort_by(|a, b| {
+                        (&a.file_name, &a.first_contig_name)
+                            .cmp(&(&b.file_name, &b.first_contig_name))
+                    });
+                    let sketches = dense.into_iter().map(Arc::new).collect::<Vec<_>>();
+                    run_pipeline(&args, &sketches, &sample.sketch)
+                }))
+            }
+        }
     }
 }
 
@@ -1224,6 +1574,7 @@ pub fn init(_py: Python, m: Bound<PyModule>) -> PyResult<()> {
 
     m.add_class::<Database>()?;
     m.add_class::<DatabaseFile>()?;
+    m.add_class::<TwoStageDatabase>()?;
 
     m.add_class::<Sketcher>()?;
     m.add_class::<Profiler>()?;

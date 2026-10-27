@@ -121,14 +121,31 @@ Once a sample has been sketched, it can be used to query a database for ANI
 containment or taxonomic profiling:
 
 ```python
-profiler = pysylph.Profiler()
-results = profiler.query(sample, database)   # ANI containment
-results = profiler.profile(sample, database) # taxonomic profiling
+profiler = pysylph.Profiler(database)
+results = profiler.query(sample)   # ANI containment
+results = profiler.profile(sample) # taxonomic profiling
 ```
 
 `Profiler` methods are re-entrant and can be used to query a database with
 multiple samples in parallel using for instance a 
 [`ThreadPool`](https://docs.python.org/3/library/multiprocessing.html#multiprocessing.pool.ThreadPool).
+
+### ⚡ Using a two-stage database
+
+For large databases, `sylph` v1.0.0 introduced a two-stage format (`.syl2db`),
+which screens samples against a small sparse index and only decodes the
+genomes that pass the screen. A database made with `sylph convert-db-two-screen`
+can be loaded and given to a `Profiler` in place of a `Database`, or one can
+be built from a `Database` in memory:
+
+```python
+database = pysylph.TwoStageDatabase.load("genomes.syl2db")
+database = pysylph.TwoStageDatabase.from_database(database)  # or from a Database
+database.dump("genomes.syl2db")
+
+profiler = pysylph.Profiler(database)
+results = profiler.profile(sample)
+```
 
 ## 🔎 See Also
 

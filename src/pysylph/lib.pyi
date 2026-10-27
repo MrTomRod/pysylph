@@ -1,7 +1,7 @@
 import abc
 import typing
 from os import PathLike
-from typing import List, Sequence, Iterable, Iterator, BinaryIO, Union
+from typing import List, Optional, Sequence, Sized, Iterable, Iterator, BinaryIO, Union
 
 try:
     from typing import Literal
@@ -49,6 +49,28 @@ class DatabaseReader(Iterator[GenomeSketch]):
     def __iter__(self) -> DatabaseReader: ...
     def __next__(self) -> GenomeSketch: ...
 
+class TwoStageDatabase(Sized):
+    @property
+    def c(self) -> int: ...
+    @property
+    def k(self) -> K: ...
+    @property
+    def screen_c(self) -> int: ...
+    def __len__(self) -> int: ...
+    def __getitem__(self, index: int) -> GenomeSketch: ...
+    @classmethod
+    def load(cls, file: Union[str, PathLike, BinaryIO]) -> TwoStageDatabase: ...
+    @classmethod
+    def from_database(
+        cls,
+        database: Database,
+        *,
+        screen_c: int = 3000,
+        min_sparse_kmers: int = 50,
+        min_contain: int = 7,
+    ) -> TwoStageDatabase: ...
+    def dump(self, path: Union[str, PathLike]) -> None: ...
+
 class SampleSketch(Sketch):
     @property
     def k(self) -> K: ...
@@ -91,13 +113,16 @@ class Sketcher:
 class Profiler:
     def __init__(
         self,
-        database: Database,
+        database: Union[Database, TwoStageDatabase],
         *,
         minimum_ani: Optional[float] = None,
         seq_id: Optional[float] = None,
         estimate_unknown: bool = False,
         min_number_kmers: int = 10,
         min_contain: int = 7,
+        screen_ani: float = 85.0,
     ) -> None: ...
+    @property
+    def database(self) -> Union[Database, TwoStageDatabase]: ...
     def query(self, sample: SampleSketch) -> List[AniResult]: ...
     def profile(self, sample: SampleSketch) -> List[ProfileResult]: ...
