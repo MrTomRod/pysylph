@@ -115,6 +115,22 @@ reads = [str(record.seq) for record in Bio.SeqIO.parse("sample.fastq", "fastq")]
 sample = sketcher.sketch_single(name="sample", reads=reads)
 ```
 
+For large (gzipped) read files, a fast parser such as
+[dnaio](https://github.com/marcelm/dnaio) is recommended. Reads can be
+streamed instead of loaded into a list, which keeps memory usage low:
+
+```python
+with dnaio.open("sample.fastq.gz") as reader:
+    sample = sketcher.sketch_single(
+        name="sample",
+        reads=(record.sequence for record in reader),
+    )
+```
+
+On a 1.5 Gbp PacBio HiFi `.fastq.gz`, this sketches about as fast as the
+`sylph` binary running on a single thread, and 1.4× faster than reading the
+file with Python's `gzip` module (2.8× faster for short reads).
+
 ### 🔬 Querying a database
 
 Once a sample has been sketched, it can be used to query a database for ANI
