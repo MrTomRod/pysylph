@@ -1,6 +1,7 @@
 import os
 import unittest
 import gzip
+import random
 import importlib.resources
 from contextlib import nullcontext
 
@@ -87,3 +88,16 @@ class TestProfiler(unittest.TestCase):
             profiler.query(sample)
         with self.assertRaises(ValueError):
             profiler.profile(sample)
+
+    def test_same_name(self):
+        # genomes sharing a name must not be mixed up in the results
+        rng = random.Random(0)
+        genomes = ["".join(rng.choice("ACGT") for _ in range(50000)) for _ in range(2)]
+        sketcher = Sketcher(c=20)
+        sketches = [sketcher.sketch_genome("same", [g]) for g in genomes]
+        reads = [genomes[1][i : i + 150] for i in range(0, 49000, 50)]
+        sample = sketcher.sketch_single("reads", reads)
+        profiler = Profiler(Database(sketches))
+        for results in (profiler.query(sample), profiler.profile(sample)):
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].genome_sketch.kmers, sketches[1].kmers)

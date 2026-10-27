@@ -432,10 +432,9 @@ impl SampleSketch {
 /// An querying result.
 #[pyclass(module = "pysylph.lib", frozen, subclass)]
 pub struct AniResult {
-    // FIXME: currently works because of shitty unsafe code, ultimately this
-    //        struct should only extract the needed attributes from AniResult
-    //        not to have to worry about reference lifetimes.
-    result: sylph::types::AniResult<'static>,
+    final_est_ani: f64,
+    naive_ani: f64,
+    final_est_cov: f64,
     genome: Py<GenomeSketch>,
 }
 
@@ -446,7 +445,7 @@ impl AniResult {
         let genome = slf.genome.bind(py).borrow();
         Ok(format!(
             "<AniResult genome={:?} ani={:?}>",
-            genome.sketch.file_name, slf.result.final_est_ani
+            genome.sketch.file_name, slf.final_est_ani
         ))
     }
 
@@ -460,25 +459,29 @@ impl AniResult {
     /// `float`: The coverage-corrected containment ANI, as a percentage.
     #[getter]
     fn ani<'py>(slf: PyRef<'py, Self>) -> f64 {
-        f64::min(slf.result.final_est_ani * 100.0, 100.0)
+        f64::min(slf.final_est_ani * 100.0, 100.0)
     }
 
     /// `float`: The containment ANI without adjustment, as a percentage.
     #[getter]
     fn ani_naive<'py>(slf: PyRef<'py, Self>) -> f64 {
-        slf.result.naive_ani * 100.0
+        slf.naive_ani * 100.0
     }
 
     /// `float`: An estimate of the effective, or the true coverage.
     #[getter]
     fn coverage<'py>(slf: PyRef<'py, Self>) -> f64 {
-        slf.result.final_est_cov
+        slf.final_est_cov
     }
 }
 
 /// A profiling result.
 #[pyclass(module = "pysylph.lib", frozen, extends=AniResult)]
-pub struct ProfileResult {}
+pub struct ProfileResult {
+    sequence_abundance: f64,
+    taxonomic_abundance: f64,
+    kmers_reassigned: usize,
+}
 
 #[pymethods]
 impl ProfileResult {
@@ -488,7 +491,7 @@ impl ProfileResult {
         Ok(format!(
             "<ProfileResult genome={:?} ani={:?}>",
             genome.sketch.file_name,
-            slf.as_super().result.final_est_ani
+            slf.as_super().final_est_ani
         ))
     }
 
@@ -498,11 +501,7 @@ impl ProfileResult {
     /// to how Kraken computes abundance.
     #[getter]
     fn sequence_abundance<'py>(slf: PyRef<'py, Self>) -> f64 {
-        *slf.as_super()
-            .result
-            .seq_abund
-            .as_ref()
-            .expect("ProfileResult should always have a sequence abundance set")
+        slf.sequence_abundance
     }
 
     /// `float`: The normalized taxonomic abundance, as a percentage. Coverage-normalized - same as MetaPhlAn abundance
@@ -511,21 +510,13 @@ impl ProfileResult {
     /// MetaPhlAn computes abundance.
     #[getter]
     fn taxonomic_abundance<'py>(slf: PyRef<'py, Self>) -> f64 {
-        *slf.as_super()
-            .result
-            .rel_abund
-            .as_ref()
-            .expect("ProfileResult should always have a taxonomic abundance set")
+        slf.taxonomic_abundance
     }
 
     /// `int`: The number of k-mers reassigned away from the genome.
     #[getter]
     fn kmers_reassigned<'py>(slf: PyRef<'py, Self>) -> usize {
-        *slf.as_super()
-            .result
-            .kmers_lost
-            .as_ref()
-            .expect("ProfileResult should always have reassigned kmers set")
+        slf.kmers_reassigned
     }
 }
 
@@ -920,6 +911,180 @@ fn check_compatible(database: &Database, sample: &SampleSketch) -> PyResult<()> 
     Ok(())
 }
 
+/// A hit of a sample against a genome, owning all the data needed to expose it.
+struct Hit {
+    genome: Arc<sylph::types::GenomeSketch>,
+    final_est_ani: f64,
+    naive_ani: f64,
+    final_est_cov: f64,
+    rel_abund: Option<f64>,
+    seq_abund: Option<f64>,
+    kmers_lost: Option<usize>,
+}
+
+impl Hit {
+    fn new(
+        result: &sylph::types::AniResult,
+        genomes: &std::collections::HashMap<*const sylph::types::GenomeSketch, &Arc<sylph::types::GenomeSketch>>,
+    ) -> Self {
+        let genome = genomes[&(result.genome_sketch as *const sylph::types::GenomeSketch)];
+        Self {
+            genome: genome.clone(),
+            final_est_ani: result.final_est_ani,
+            naive_ani: result.naive_ani,
+            final_est_cov: result.final_est_cov,
+            rel_abund: result.rel_abund,
+            seq_abund: result.seq_abund,
+            kmers_lost: result.kmers_lost,
+        }
+    }
+
+    fn into_ani_result(self, py: Python<'_>) -> PyResult<Py<AniResult>> {
+        let genome = Py::new(
+            py,
+            PyClassInitializer::from(Sketch).add_subclass(GenomeSketch::from(self.genome)),
+        )?;
+        Py::new(
+            py,
+            PyClassInitializer::from(AniResult {
+                final_est_ani: self.final_est_ani,
+                naive_ani: self.naive_ani,
+                final_est_cov: self.final_est_cov,
+                genome,
+            }),
+        )
+    }
+
+    fn into_profile_result(self, py: Python<'_>) -> PyResult<Py<ProfileResult>> {
+        let profile = ProfileResult {
+            sequence_abundance: self.seq_abund.ok_or_else(|| {
+                PyRuntimeError::new_err("profile result without sequence abundance")
+            })?,
+            taxonomic_abundance: self.rel_abund.ok_or_else(|| {
+                PyRuntimeError::new_err("profile result without taxonomic abundance")
+            })?,
+            kmers_reassigned: self.kmers_lost.ok_or_else(|| {
+                PyRuntimeError::new_err("profile result without reassigned k-mers")
+            })?,
+        };
+        let genome = Py::new(
+            py,
+            PyClassInitializer::from(Sketch).add_subclass(GenomeSketch::from(self.genome)),
+        )?;
+        Py::new(
+            py,
+            PyClassInitializer::from(AniResult {
+                final_est_ani: self.final_est_ani,
+                naive_ani: self.naive_ani,
+                final_est_cov: self.final_est_cov,
+                genome,
+            })
+            .add_subclass(profile),
+        )
+    }
+}
+
+/// Run the ``sylph query`` (or ``sylph profile``, if ``args.pseudotax``)
+/// pipeline for a sample against a list of genome sketches.
+///
+/// Results are mapped back to the sketches they were computed from by
+/// pointer identity, since several sketches can share the same name.
+fn run_pipeline(
+    args: &sylph::cmdline::ContainArgs,
+    sketches: &[Arc<sylph::types::GenomeSketch>],
+    sample: &sylph::types::SequencesSketch,
+) -> Vec<Hit> {
+    // estimate sample kmer identity
+    let kmer_id_opt = if let Some(x) = args.seq_id {
+        Some(x.powf(sample.k as f64))
+    } else {
+        sylph::contain::get_kmer_identity(sample, args.estimate_unknown)
+    };
+
+    // extract all matching kmers
+    let mut stats = sketches
+        .par_iter()
+        .flat_map_iter(|sketch| sylph::contain::get_stats(args, sketch, sample, None, false))
+        .collect::<Vec<_>>();
+
+    // estimate true coverage
+    sylph::contain::estimate_true_cov(
+        &mut stats,
+        kmer_id_opt,
+        args.estimate_unknown,
+        sample.mean_read_length,
+        sample.k,
+    );
+
+    if args.pseudotax {
+        // reassign k-mers
+        let winner_map = sylph::contain::winner_table(&stats, false);
+        let remaining_stats = stats
+            .iter()
+            .map(|x| x.genome_sketch)
+            .flat_map(|genome_sketch| {
+                sylph::contain::get_stats(args, genome_sketch, sample, Some(&winner_map), false)
+            })
+            .collect();
+        stats = sylph::contain::derep_if_reassign_threshold(
+            &stats,
+            remaining_stats,
+            args.redundant_ani,
+            sample.k,
+        );
+        sylph::contain::estimate_true_cov(
+            &mut stats,
+            kmer_id_opt,
+            args.estimate_unknown,
+            sample.mean_read_length,
+            sample.k,
+        );
+
+        // estimate unknown if needed
+        let mut bases_explained = 1.;
+        if args.estimate_unknown {
+            bases_explained = sylph::contain::estimate_covered_bases(
+                &stats,
+                sample,
+                sample.mean_read_length,
+                sample.k,
+            );
+        }
+
+        // compute coverage and relative abundances
+        let total_cov = stats.iter().map(|x| x.final_est_cov).sum::<f64>();
+        let total_seq_cov = stats
+            .iter()
+            .map(|x| x.final_est_cov * x.genome_sketch.gn_size as f64)
+            .sum::<f64>();
+        for result in stats.iter_mut() {
+            result.rel_abund = Some(result.final_est_cov / total_cov * 100.0);
+            result.seq_abund = Some(
+                result.final_est_cov * result.genome_sketch.gn_size as f64 / total_seq_cov * 100.0
+                    * bases_explained,
+            );
+        }
+
+        // sort by relative abundance
+        stats.sort_by(|x, y| {
+            y.rel_abund
+                .unwrap()
+                .partial_cmp(&x.rel_abund.unwrap())
+                .unwrap()
+        });
+    } else {
+        // sort by ANI
+        stats.sort_by(|x, y| y.final_est_ani.partial_cmp(&x.final_est_ani).unwrap());
+    }
+
+    // take ownership of the results
+    let genomes = sketches
+        .iter()
+        .map(|arc| (Arc::as_ptr(arc), arc))
+        .collect::<std::collections::HashMap<_, _>>();
+    stats.iter().map(|r| Hit::new(r, &genomes)).collect()
+}
+
 /// A ``sylph`` profiler.
 ///
 /// Arguments:
@@ -997,72 +1162,8 @@ impl Profiler {
     #[pyo3(signature = (sample))]
     fn query<'py>(&self, sample: PyRef<'py, SampleSketch>) -> PyResult<Vec<Py<AniResult>>> {
         let py = sample.py();
-        let database = self.database.bind(py).borrow();
-        check_compatible(&database, &sample)?;
-        let mut args = sylph::cmdline::ContainArgs::from_cli_defaults(false);
-        args.minimum_ani = self.minimum_ani;
-        args.min_number_kmers = self.min_number_kmers as f64;
-        args.min_contain = self.min_contain;
-        args.estimate_unknown = self.estimate_unknown;
-        args.seq_id = self.seq_id;
-        args.no_sketch_pipeline = true;
-
-        // estimate sample kmer identity
-        let kmer_id_opt = if let Some(x) = args.seq_id {
-            Some(x.powf(sample.sketch.k as f64))
-        } else {
-            sylph::contain::get_kmer_identity(&sample.sketch, args.estimate_unknown)
-        };
-
-        // extract all matching kmers
-        let sample_sketch = &sample.sketch;
-        let database_sketches = &database.sketches;
-        let mut stats = py.detach(|| {
-            database_sketches
-                .par_iter()
-                .flat_map_iter(|sketch| {
-                    sylph::contain::get_stats(&args, &sketch, &sample_sketch, None, false)
-                })
-                .collect::<Vec<_>>()
-        });
-
-        // estimate true coverage
-        sylph::contain::estimate_true_cov(
-            &mut stats,
-            kmer_id_opt,
-            args.estimate_unknown,
-            sample.sketch.mean_read_length,
-            sample.sketch.k,
-        );
-
-        // sort by ANI
-        // if pseudotax {} else {
-        stats.sort_by(|x, y| y.final_est_ani.partial_cmp(&x.final_est_ani).unwrap());
-        // }
-
-        // Ok(())
-        stats
-            .into_iter()
-            .map(|r| {
-                let sketch = database
-                    .sketches
-                    .iter()
-                    .find(|x| r.genome_sketch.file_name == x.file_name)
-                    .unwrap();
-                let genome = Py::new(
-                    py,
-                    PyClassInitializer::from(Sketch)
-                        .add_subclass(GenomeSketch::from(sketch.clone())),
-                )?;
-                Py::new(
-                    py,
-                    PyClassInitializer::from(AniResult {
-                        result: unsafe { std::mem::transmute(r) },
-                        genome,
-                    }),
-                )
-            })
-            .collect()
+        let hits = self.run(py, false, &sample)?;
+        hits.into_iter().map(|hit| hit.into_ani_result(py)).collect()
     }
 
     /// Build a taxonomic profile for the given sample.
@@ -1078,9 +1179,23 @@ impl Profiler {
     #[pyo3(signature = (sample))]
     fn profile<'py>(&self, sample: PyRef<'py, SampleSketch>) -> PyResult<Vec<Py<ProfileResult>>> {
         let py = sample.py();
+        let hits = self.run(py, true, &sample)?;
+        hits.into_iter()
+            .map(|hit| hit.into_profile_result(py))
+            .collect()
+    }
+}
+
+impl Profiler {
+    fn run<'py>(
+        &self,
+        py: Python<'py>,
+        pseudotax: bool,
+        sample: &SampleSketch,
+    ) -> PyResult<Vec<Hit>> {
         let database = self.database.bind(py).borrow();
-        check_compatible(&database, &sample)?;
-        let mut args = sylph::cmdline::ContainArgs::from_cli_defaults(true);
+        check_compatible(&database, sample)?;
+        let mut args = sylph::cmdline::ContainArgs::from_cli_defaults(pseudotax);
         args.minimum_ani = self.minimum_ani;
         args.min_number_kmers = self.min_number_kmers as f64;
         args.min_contain = self.min_contain;
@@ -1088,123 +1203,8 @@ impl Profiler {
         args.seq_id = self.seq_id;
         args.no_sketch_pipeline = true;
 
-        // estimate sample kmer identity
-        let kmer_id_opt = if let Some(x) = args.seq_id {
-            Some(x.powf(sample.sketch.k as f64))
-        } else {
-            sylph::contain::get_kmer_identity(&sample.sketch, args.estimate_unknown)
-        };
-
-        // extract all matching kmers
-        let sample_sketch = &sample.sketch;
-        let database_sketches = &database.sketches;
-        let mut stats = py.detach(|| {
-            database_sketches
-                .par_iter()
-                .flat_map_iter(|sketch| {
-                    sylph::contain::get_stats(&args, &sketch, &sample_sketch, None, false)
-                })
-                .collect::<Vec<_>>()
-        });
-
-        // estimate true coverage
-        sylph::contain::estimate_true_cov(
-            &mut stats,
-            kmer_id_opt,
-            args.estimate_unknown,
-            sample.sketch.mean_read_length,
-            sample.sketch.k,
-        );
-
-        if true {
-            // reassign k-mers
-            let winner_map = sylph::contain::winner_table(&stats, false);
-            let remaining_stats = stats
-                .iter()
-                .map(|x| x.genome_sketch)
-                .flat_map(|genome_sketch| {
-                    sylph::contain::get_stats(
-                        &args,
-                        &genome_sketch,
-                        &sample.sketch,
-                        Some(&winner_map),
-                        false,
-                    )
-                })
-                .collect();
-            stats = sylph::contain::derep_if_reassign_threshold(
-                &stats,
-                remaining_stats,
-                args.redundant_ani,
-                sample.sketch.k,
-            );
-            sylph::contain::estimate_true_cov(
-                &mut stats,
-                kmer_id_opt,
-                args.estimate_unknown,
-                sample.sketch.mean_read_length,
-                sample.sketch.k,
-            );
-
-            // estimate unknown if needed
-            let mut bases_explained = 1.;
-            if args.estimate_unknown {
-                bases_explained = sylph::contain::estimate_covered_bases(
-                    &stats,
-                    &sample.sketch,
-                    sample.sketch.mean_read_length,
-                    sample.sketch.k,
-                );
-            }
-
-            // compute coverage and relative abundances
-            let total_cov = stats.iter().map(|x| x.final_est_cov).sum::<f64>();
-            let total_seq_cov = stats
-                .iter()
-                .map(|x| x.final_est_cov * x.genome_sketch.gn_size as f64)
-                .sum::<f64>();
-            for result in stats.iter_mut() {
-                result.rel_abund = Some(result.final_est_cov / total_cov * 100.0);
-                result.seq_abund = Some(
-                    result.final_est_cov * result.genome_sketch.gn_size as f64 / total_seq_cov
-                        * 100.0
-                        * bases_explained,
-                );
-            }
-        }
-
-        // sort by relative abundance
-        stats.sort_by(|x, y| {
-            y.rel_abund
-                .unwrap()
-                .partial_cmp(&x.rel_abund.unwrap())
-                .unwrap()
-        });
-
-        // convert result
-        stats
-            .into_iter()
-            .map(|r| {
-                let sketch = database
-                    .sketches
-                    .iter()
-                    .find(|x| r.genome_sketch.file_name == x.file_name)
-                    .unwrap();
-                let genome = Py::new(
-                    py,
-                    PyClassInitializer::from(Sketch)
-                        .add_subclass(GenomeSketch::from(sketch.clone())),
-                )?;
-                Py::new(
-                    py,
-                    PyClassInitializer::from(AniResult {
-                        result: unsafe { std::mem::transmute(r) },
-                        genome,
-                    })
-                    .add_subclass(ProfileResult {}),
-                )
-            })
-            .collect()
+        let sketches = &database.sketches;
+        Ok(py.detach(|| run_pipeline(&args, sketches, &sample.sketch)))
     }
 }
 

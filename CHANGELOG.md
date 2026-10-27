@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   number of contained k-mers required to report a genome, as in `sylph` v1.0.0.
 
 ### Changed
+- `AniResult` and `ProfileResult` now own their data, and genomes are matched
+  to results by identity instead of by name, which was wrong when several
+  genomes of a database share the same name.
+- `Profiler.profile` and `Profiler.query` now release the GIL during the whole
+  computation.
 - Update `sylph` to `v1.0.0` (via a fork exposing its API, replacing the
   vendored copy of `sylph` internals).
 - Default of `Profiler.min_number_kmers` lowered from 50 to 10 to match `sylph` v1.0.0.
