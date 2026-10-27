@@ -58,6 +58,21 @@ class TestProfiler(unittest.TestCase):
         self.assertAlmostEqual(results[0].taxonomic_abundance, 100.0, places=2)
         self.assertAlmostEqual(results[0].kmers_reassigned, 0)
 
+    def test_seq_id(self):
+        # expected values from `sylph query|profile -u -I 99.5 ecoli.syldb o157.sylsp`
+        profiler = Profiler(self.db, estimate_unknown=True, seq_id=99.5)
+        results = profiler.query(self.sample)
+        self.assertEqual(len(results), 3)
+        self.assertAlmostEqual(results[0].ani, 99.79, places=2)
+        self.assertAlmostEqual(results[0].coverage, 0.421, places=3)
+        self.assertAlmostEqual(results[1].coverage, 0.374, places=3)
+        self.assertAlmostEqual(results[2].coverage, 0.382, places=3)
+        results = profiler.profile(self.sample)
+        self.assertEqual(len(results), 1)
+        self.assertAlmostEqual(results[0].coverage, 0.421, places=3)
+        self.assertAlmostEqual(results[0].taxonomic_abundance, 100.0, places=4)
+        self.assertAlmostEqual(results[0].sequence_abundance, 42.2897, places=4)
+
     def test_min_contain(self):
         # o157 hit has 6208 contained k-mers, others have 3122 and 3114
         profiler = Profiler(self.db, min_contain=3120)

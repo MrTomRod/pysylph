@@ -1271,9 +1271,9 @@ fn run_pipeline(
     sketches: &[Arc<sylph::types::GenomeSketch>],
     sample: &sylph::types::SequencesSketch,
 ) -> Vec<Hit> {
-    // estimate sample kmer identity
+    // estimate sample kmer identity (seq_id is a percentage, as in sylph)
     let kmer_id_opt = if let Some(x) = args.seq_id {
-        Some(x.powf(sample.k as f64))
+        Some((x / 100.0).powf(sample.k as f64))
     } else {
         sylph::contain::get_kmer_identity(sample, args.estimate_unknown)
     };

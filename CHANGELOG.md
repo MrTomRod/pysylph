@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Read deduplication filter and bootstrap confidence intervals are now seeded
   as in `sylph` v1.0.0, making results reproducible.
 
+### Fixed
+- `Sketcher.sketch_single` never deduplicated reads because of an inverted
+  read-length check.
+- ANI values computed with a wrong value of `e` in the vendored
+  `ani_from_lambda` (fixed in `sylph` v0.8.1); ANI values rise by about 0.06.
+- `Profiler` treated `seq_id` as a fraction instead of a percentage, giving
+  meaningless coverages when combined with `estimate_unknown`.
+
 
 ## [v0.1.3] - 2026-09-01
 [v0.1.3]: https://github.com/althonos/pysylph/compare/v0.1.2...v0.1.3
