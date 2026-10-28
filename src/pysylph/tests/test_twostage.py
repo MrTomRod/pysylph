@@ -397,3 +397,102 @@ class TestTwoStageProfiler(_TwoStageTestCase):
             Profiler(self.db[0])
         with self.assertRaises(TypeError):
             Profiler(None)
+
+
+class TestNoAdjust(unittest.TestCase):
+    """``Profiler(no_adjust=True)`` reports the naive containment ANI.
+
+    Querying an assembly (where every k-mer of the sample occurs once) makes
+    the coverage-based ANI adjustment meaningless: the effective coverage is
+    estimated to a fractional value, and the adjustment inflates the ANI to
+    100% with confidence intervals above 100%. With ``no_adjust=True``,
+    ``AniResult.ani`` is the naive containment ANI, as with the hidden
+    ``sylph --no-adjust`` option.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sketcher = Sketcher(c=20)
+        # a random 200kb genome, and a 3% divergent "assembly" of it with a
+        # 40kb segment duplicated: a few matched k-mers then occur twice, so
+        # sylph estimates a fractional coverage and applies the adjustment
+        genome = random_genome(200_000, 7)
+        cls.db = Database([cls.sketcher.sketch_genome("g", [genome])])
+        cls.tsdb = TwoStageDatabase.from_database(cls.db)
+        rng = random.Random(1)
+        mutated = list(genome)
+        for i in range(len(mutated)):
+            if rng.random() < 0.03:
+                mutated[i] = rng.choice([b for b in "ACGT" if b != mutated[i]])
+        assembly = "".join(mutated) + genome[50_000:90_000]
+        cls.sample = cls.sketcher.sketch_single("assembly", [assembly])
+        # a read sample, for which the adjustment is meaningful
+        cls.reads = SampleSketch.load(data_path("o157.sylsp"))
+        cls.reads_db = Database.load(data_path("ecoli.syldb"))
+        cls.reads_tsdb = TwoStageDatabase.load(data_path("ecoli.syl2db"))
+
+    def test_assembly_query(self):
+        for database in (self.db, self.tsdb):
+            with self.subTest(database=type(database).__name__):
+                (adjusted,) = Profiler(database).query(self.sample)
+                (naive,) = Profiler(database, no_adjust=True).query(self.sample)
+                # the coverage-based adjustment is meaningless here and
+                # inflates the ANI to 100%
+                self.assertEqual(adjusted.ani_naive, naive.ani)
+                self.assertAlmostEqual(naive.ani, naive.ani_naive)
+                self.assertAlmostEqual(naive.ani, 97.82, places=2)
+                self.assertGreater(adjusted.ani, naive.ani + 1.0)
+                # only the final ANI is disabled: the coverage, lambda and
+                # confidence intervals are still those of the adjustment
+                self.assertEqual(naive.coverage, adjusted.coverage)
+                self.assertEqual(naive.ani_ci, adjusted.ani_ci)
+                self.assertEqual(naive.lambda_status, adjusted.lambda_status)
+                self.assertEqual(naive.effective_lambda, adjusted.effective_lambda)
+                self.assertEqual(naive.lambda_ci, adjusted.lambda_ci)
+                self.assertEqual(naive.median_coverage, adjusted.median_coverage)
+                self.assertEqual(naive.mean_coverage, adjusted.mean_coverage)
+                self.assertEqual(naive.containment, adjusted.containment)
+
+    def test_assembly_profile(self):
+        for database in (self.db, self.tsdb):
+            with self.subTest(database=type(database).__name__):
+                (result,) = Profiler(database, no_adjust=True).profile(self.sample)
+                self.assertAlmostEqual(result.ani, result.ani_naive)
+                self.assertAlmostEqual(result.ani, 97.82, places=2)
+                self.assertAlmostEqual(result.sequence_abundance, 100.0)
+                self.assertAlmostEqual(result.taxonomic_abundance, 100.0)
+
+    def test_minimum_ani(self):
+        # `minimum_ani` filters on the reported ANI, so it applies to the
+        # naive ANI when `no_adjust` is set
+        for database in (self.db, self.tsdb):
+            with self.subTest(database=type(database).__name__):
+                profiler = Profiler(database, minimum_ani=99.0)
+                self.assertEqual(len(profiler.query(self.sample)), 1)
+                profiler = Profiler(database, minimum_ani=99.0, no_adjust=True)
+                self.assertEqual(profiler.query(self.sample), [])
+                self.assertEqual(profiler.profile(self.sample), [])
+
+    def test_screen_ani_uses_naive_ani(self):
+        # the first-stage screen of a two-stage database inherits `no_adjust`,
+        # and thus screens on the naive ANI (~97.8) instead of the adjusted
+        # one (which the screen also estimates at 100 here)
+        profiler = Profiler(self.tsdb, screen_ani=99.0)
+        self.assertEqual(len(profiler.query(self.sample)), 1)
+        profiler = Profiler(self.tsdb, screen_ani=99.0, no_adjust=True)
+        self.assertEqual(profiler.query(self.sample), [])
+
+    def test_default_unchanged(self):
+        # reads: the adjustment is meaningful, and `no_adjust` defaults to
+        # raising the ANI above the naive containment ANI
+        for database in (self.reads_db, self.reads_tsdb):
+            with self.subTest(database=type(database).__name__):
+                expected = Profiler(database).query(self.reads)
+                explicit = Profiler(database, no_adjust=False).query(self.reads)
+                self.assertEqual(len(expected), 3)
+                self.assertEqual(
+                    [(r.ani, r.ani_naive) for r in explicit],
+                    [(r.ani, r.ani_naive) for r in expected],
+                )
+                self.assertAlmostEqual(expected[0].ani, 99.79, places=2)
+                self.assertAlmostEqual(expected[0].ani_naive, 96.02, places=2)

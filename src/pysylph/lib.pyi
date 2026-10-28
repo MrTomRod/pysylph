@@ -138,6 +138,7 @@ class Profiler:
         min_number_kmers: int = 10,
         min_contain: int = 7,
         screen_ani: float = 85.0,
+        no_adjust: bool = False,
     ) -> None: ...
     @property
     def database(self) -> Union[Database, TwoStageDatabase]: ...

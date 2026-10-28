@@ -1603,6 +1603,19 @@ fn run_pipeline(
 ///     screen_ani (`float`): The minimum adjusted ANI (0-100) for a genome
 ///         to pass the first-stage screen of a `TwoStageDatabase`. This is
 ///         deliberately permissive, and ignored for a `Database`.
+///     no_adjust (`bool`): Disable the coverage-based ANI adjustment, and
+///         report the naive containment ANI (the ``Naive_ANI`` column of the
+///         ``sylph`` output) instead of the adjusted one. Use this when
+///         querying assemblies (or any sample where every k-mer occurs at
+///         most once): the coverage-based correction is then meaningless,
+///         and inflates the adjusted ANI to 100 with confidence intervals
+///         above 100. With this flag, ``AniResult.ani`` equals
+///         ``AniResult.ani_naive``, and ``minimum_ani`` (as well as
+///         ``screen_ani`` for a `TwoStageDatabase`) is applied to the naive
+///         ANI. The coverage, lambda and confidence interval fields are still
+///         those of the (now disabled) adjustment.
+///
+///         .. versionadded:: 0.2.0
 ///
 /// Raises:
 ///     `TypeError`: When ``database`` or any of ``extra_databases`` is
@@ -1627,6 +1640,7 @@ pub struct Profiler {
     min_number_kmers: usize,
     min_contain: usize,
     screen_ani: f64,
+    no_adjust: bool,
     databases: Vec<ProfilerDatabase>,
 }
 
@@ -1648,7 +1662,7 @@ impl ProfilerDatabase {
 #[pymethods]
 impl Profiler {
     #[new]
-    #[pyo3(signature = (database, *extra_databases, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7, screen_ani = sylph::constants::SCREEN_MIN_ANI_DEFAULT))]
+    #[pyo3(signature = (database, *extra_databases, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7, screen_ani = sylph::constants::SCREEN_MIN_ANI_DEFAULT, no_adjust = false))]
     pub fn __new__<'py>(
         database: &Bound<'py, PyAny>,
         extra_databases: &Bound<'py, PyTuple>,
@@ -1658,6 +1672,7 @@ impl Profiler {
         min_number_kmers: usize,
         min_contain: usize,
         screen_ani: f64,
+        no_adjust: bool,
     ) -> PyResult<Self> {
         let py = database.py();
         let databases = extract_databases(database, extra_databases)?;
@@ -1684,6 +1699,7 @@ impl Profiler {
             min_number_kmers,
             min_contain,
             screen_ani,
+            no_adjust,
         })
     }
 
@@ -1758,6 +1774,7 @@ impl Profiler {
         args.seq_id = self.seq_id;
         args.no_sketch_pipeline = true;
         args.screen_ani = self.screen_ani;
+        args.no_adj = self.no_adjust;
         args.screen_dump = None;
 
         Ok(py.detach(|| {

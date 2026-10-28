@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   estimation. All databases must share the same `k` (`ValueError` otherwise) and
   a `UserWarning` is emitted if a genome is present in several databases.
   `Profiler.databases` returns the tuple of databases.
+- `no_adjust` keyword argument to `Profiler` (default: `False`), exposing the
+  hidden `sylph --no-adjust` option: the coverage-based ANI adjustment is
+  disabled and `AniResult.ani` reports the naive containment ANI instead
+  (`AniResult.ani_naive`), with `minimum_ani` (and `screen_ani` for a
+  `TwoStageDatabase`) applied to it. Useful when querying assemblies, where
+  every k-mer occurs once and the coverage-based adjustment is meaningless.
 
 ### Changed
 - `AniResult` and `ProfileResult` now own their data, and genomes are matched
