@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - `SampleSketch` objects can now be pickled.
 - `SampleSketch.n_kmers` to get the number of distinct k-mers of a sketch
   without building the `dict` returned by `SampleSketch.kmer_counts`.
+- `SampleSketch.mean_read_length` to get the mean length of the sample reads.
 - `Profiler` can be given several databases as positional arguments
   (`Profiler(db1, db2, ...)`, or `Profiler(*databases)` for a list), in any mix
   of `Database` and `TwoStageDatabase`, as in
@@ -39,6 +40,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   (`AniResult.ani_naive`), with `minimum_ani` (and `screen_ani` for a
   `TwoStageDatabase`) applied to it. Useful when querying assemblies, where
   every k-mer occurs once and the coverage-based adjustment is meaningless.
+- `estimate_read_counts` keyword argument to `Profiler` (default: `False`),
+  exposing `sylph --estimate-read-counts`: `ProfileResult.sequence_abundance`
+  then holds the estimated number of reads assigned to each genome (a
+  rounded `float`) instead of a relative abundance. As in `sylph`, this
+  implies `estimate_unknown`.
 
 ### Changed
 - `AniResult` and `ProfileResult` now own their data, and genomes are matched

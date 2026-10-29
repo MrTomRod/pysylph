@@ -633,6 +633,12 @@ impl SampleSketch {
         self.sketch.k
     }
 
+    /// `float`: The mean length of the reads in this sample.
+    #[getter]
+    pub fn mean_read_length(&self) -> f64 {
+        self.sketch.mean_read_length
+    }
+
     /// `int`: The number of distinct k-mers in this sketch.
     ///
     /// This is equal to ``len(sketch.kmer_counts)``, but is computed without
@@ -947,6 +953,11 @@ impl ProfileResult {
     ///
     /// This is the *percentage of reads* assigned to each genome, similar
     /// to how Kraken computes abundance.
+    ///
+    /// When the `Profiler` was created with ``estimate_read_counts=True``,
+    /// this is instead the *estimated number of reads* assigned to the
+    /// genome, as a rounded floating-point value (the ``Sequence_abundance``
+    /// column of ``sylph --estimate-read-counts``).
     #[getter]
     fn sequence_abundance<'py>(slf: PyRef<'py, Self>) -> f64 {
         slf.sequence_abundance
@@ -1558,10 +1569,19 @@ fn run_pipeline(
             .sum::<f64>();
         for result in stats.iter_mut() {
             result.rel_abund = Some(result.final_est_cov / total_cov * 100.0);
-            result.seq_abund = Some(
-                result.final_est_cov * result.genome_sketch.gn_size as f64 / total_seq_cov * 100.0
-                    * bases_explained,
-            );
+            result.seq_abund = Some(if args.estimate_read_counts {
+                // `sylph --estimate-read-counts`: the sequence abundance
+                // column holds the estimated number of reads instead of a
+                // relative abundance
+                (result.final_est_cov * result.genome_sketch.gn_size as f64
+                    / sample.mean_read_length
+                    * bases_explained)
+                    .round()
+            } else {
+                result.final_est_cov * result.genome_sketch.gn_size as f64 / total_seq_cov
+                    * 100.0
+                    * bases_explained
+            });
         }
 
         // sort by relative abundance
@@ -1625,6 +1645,19 @@ fn run_pipeline(
 ///         those of the (now disabled) adjustment.
 ///
 ///         .. versionadded:: 0.2.0
+///     estimate_read_counts (`bool`): Report the estimated number of reads
+///         assigned to each genome, instead of a relative abundance, in
+///         `ProfileResult.sequence_abundance` (the ``Sequence_abundance``
+///         column of ``sylph --estimate-read-counts``). The value is
+///         rounded, and still a `float`. As in ``sylph``, this option
+///         implies ``estimate_unknown``, which thus does not need to be
+///         set explicitly. The reported value is computed as the
+///         estimated true coverage multiplied by the genome size and
+///         divided by the mean read length, scaled by the percentage of
+///         bases explained by the database. This is still experimental in
+///         ``sylph``.
+///
+///         .. versionadded:: 0.2.0
 ///
 /// Raises:
 ///     `TypeError`: When ``database`` or any of ``extra_databases`` is
@@ -1650,6 +1683,7 @@ pub struct Profiler {
     min_contain: usize,
     screen_ani: f64,
     no_adjust: bool,
+    estimate_read_counts: bool,
     databases: Vec<ProfilerDatabase>,
 }
 
@@ -1671,7 +1705,7 @@ impl ProfilerDatabase {
 #[pymethods]
 impl Profiler {
     #[new]
-    #[pyo3(signature = (database, *extra_databases, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7, screen_ani = sylph::constants::SCREEN_MIN_ANI_DEFAULT, no_adjust = false))]
+    #[pyo3(signature = (database, *extra_databases, minimum_ani = None, seq_id = None, estimate_unknown = false, min_number_kmers = 10, min_contain = 7, screen_ani = sylph::constants::SCREEN_MIN_ANI_DEFAULT, no_adjust = false, estimate_read_counts = false))]
     pub fn __new__<'py>(
         database: &Bound<'py, PyAny>,
         extra_databases: &Bound<'py, PyTuple>,
@@ -1682,6 +1716,7 @@ impl Profiler {
         min_contain: usize,
         screen_ani: f64,
         no_adjust: bool,
+        estimate_read_counts: bool,
     ) -> PyResult<Self> {
         let py = database.py();
         let databases = extract_databases(database, extra_databases)?;
@@ -1709,6 +1744,7 @@ impl Profiler {
             min_contain,
             screen_ani,
             no_adjust,
+            estimate_read_counts,
         })
     }
 
@@ -1779,7 +1815,9 @@ impl Profiler {
         args.minimum_ani = self.minimum_ani;
         args.min_number_kmers = self.min_number_kmers as f64;
         args.min_contain = self.min_contain;
-        args.estimate_unknown = self.estimate_unknown;
+        // `sylph --estimate-read-counts` implies `--estimate-unknown`
+        args.estimate_unknown = self.estimate_unknown || self.estimate_read_counts;
+        args.estimate_read_counts = self.estimate_read_counts;
         args.seq_id = self.seq_id;
         args.no_sketch_pipeline = true;
         args.screen_ani = self.screen_ani;

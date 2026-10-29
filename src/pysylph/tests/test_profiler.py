@@ -1,4 +1,5 @@
 import os
+import pathlib
 import unittest
 import gzip
 import random
@@ -6,6 +7,12 @@ import importlib.resources
 from contextlib import nullcontext
 
 from pysylph import Database, SampleSketch, Sketcher, Profiler
+
+
+def data_path(name):
+    if hasattr(importlib.resources, "files"):
+        return os.fspath(importlib.resources.files(__package__).joinpath(name))
+    return os.fspath(pathlib.Path(__file__).parent / name)
 
 
 class TestProfiler(unittest.TestCase):
@@ -220,3 +227,116 @@ class TestProfiler(unittest.TestCase):
         for results in (profiler.query(sample), profiler.profile(sample)):
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0].genome_sketch.kmers, sketches[1].kmers)
+
+
+class TestEstimateReadCounts(unittest.TestCase):
+    """``Profiler(estimate_read_counts=True)`` reports estimated read counts.
+
+    This exposes the ``sylph --estimate-read-counts`` option: instead of a
+    relative abundance, ``ProfileResult.sequence_abundance`` holds the
+    estimated number of reads assigned to each genome, computed as
+
+        True_cov * genome_size / mean_read_length * bases_explained
+
+    and rounded, as in ``sylph``. Like ``sylph``, the option implies
+    ``estimate_unknown`` (``-u``).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sketcher = Sketcher(c=20)
+        cls.db = Database.load(data_path("ecoli.syldb"))
+        cls.clodf13 = Database.load(data_path("clodf13.syldb"))
+        cls.sample = SampleSketch.load(data_path("o157.sylsp"))
+        # K-12 reads (~0.03x) mixed with CloDF13 plasmid reads (~3x)
+        cls.mix = SampleSketch.load(data_path("mix.sylsp"))
+
+    def test_profile_reference_values(self):
+        # expected values from
+        # `sylph profile --estimate-read-counts ecoli.syldb clodf13.syldb mix.sylsp`
+        profiler = Profiler(self.db, self.clodf13, estimate_read_counts=True)
+        results = profiler.profile(self.mix)
+        self.assertEqual(len(results), 2)
+        for result, count, abundance in zip(
+            results, [566.0, 3889.0], [98.5483, 1.4517]
+        ):
+            # counts are rounded, but still floats
+            self.assertIsInstance(result.sequence_abundance, float)
+            self.assertTrue(result.sequence_abundance.is_integer())
+            self.assertAlmostEqual(result.sequence_abundance, count)
+            # the taxonomic abundance is unchanged, and still a percentage
+            self.assertAlmostEqual(result.taxonomic_abundance, abundance, places=4)
+        # sorted by relative abundance, like `sylph`
+        self.assertEqual(
+            [r.genome_sketch.description.split(" ")[0] for r in results],
+            ["X04466.1", "NC_007779.1"],
+        )
+
+    def test_single_hit(self):
+        # `sylph profile --estimate-read-counts ecoli.syldb o157.sylsp`
+        (result,) = Profiler(self.db, estimate_read_counts=True).profile(self.sample)
+        self.assertAlmostEqual(result.sequence_abundance, 1149.0)
+        self.assertAlmostEqual(result.taxonomic_abundance, 100.0)
+
+    def test_implies_estimate_unknown(self):
+        # `--estimate-read-counts` forces `-u`, as in `sylph`: the coverage
+        # is the true coverage, not the effective coverage
+        expected = Profiler(self.db, estimate_unknown=True)
+        actual = Profiler(self.db, estimate_read_counts=True)
+        # explicitly passing `estimate_unknown=False` is overridden
+        explicit = Profiler(
+            self.db, estimate_unknown=False, estimate_read_counts=True
+        )
+        for profiler in (actual, explicit):
+            query = profiler.query(self.sample)
+            self.assertEqual(
+                [(r.coverage, r.ani) for r in query],
+                [(r.coverage, r.ani) for r in expected.query(self.sample)],
+            )
+            # the coverage is the true coverage of `-u`, not the effective
+            # coverage of the default
+            self.assertAlmostEqual(query[0].coverage, 3.108, places=3)
+            self.assertNotAlmostEqual(
+                query[0].coverage,
+                Profiler(self.db).query(self.sample)[0].coverage,
+                places=3,
+            )
+            # the profile is filtered the same way as with `-u`
+            self.assertEqual(
+                [
+                    (r.genome_sketch.name, r.taxonomic_abundance)
+                    for r in profiler.profile(self.sample)
+                ],
+                [
+                    (r.genome_sketch.name, r.taxonomic_abundance)
+                    for r in expected.profile(self.sample)
+                ],
+            )
+
+    def test_matches_formula(self):
+        # check the counts against the formula used by `sylph`, with reads of
+        # a known length (so that the mean read length is known exactly)
+        rng = random.Random(3)
+        genome = "".join(rng.choice("ACGT") for _ in range(100_000))
+        database = Database([self.sketcher.sketch_genome("g", [genome])])
+        read_length = 150
+        reads = [
+            genome[i : i + read_length]
+            for i in range(0, len(genome) - read_length, read_length // 10)
+        ]
+        sample = self.sketcher.sketch_single("reads", reads)
+        # `bases_explained` is the sum of the relative sequence abundances
+        # scaled back by 100 (the abundances are normalized to 100%)
+        (relative,) = Profiler(database, estimate_unknown=True).profile(sample)
+        bases_explained = relative.sequence_abundance / 100.0
+        (counts,) = Profiler(database, estimate_read_counts=True).profile(sample)
+        expected = round(
+            relative.coverage
+            * relative.genome_sketch.genome_size
+            / read_length
+            * bases_explained
+        )
+        self.assertGreater(counts.sequence_abundance, 0)
+        self.assertEqual(counts.sequence_abundance, float(expected))
+        self.assertEqual(relative.taxonomic_abundance, counts.taxonomic_abundance)
+        self.assertEqual(relative.coverage, counts.coverage)

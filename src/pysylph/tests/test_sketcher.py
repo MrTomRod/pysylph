@@ -92,6 +92,12 @@ class TestSketcher(unittest.TestCase):
             expected = SampleSketch.load(path)
         self.assertEqual(sketch.kmer_counts, expected.kmer_counts)
 
+    def test_mean_read_length(self):
+        sketch = Sketcher().sketch_single("sample", ["A" * 100, "C" * 200])
+        self.assertEqual(sketch.mean_read_length, 150.0)
+        with self.assertRaises(AttributeError):
+            sketch.mean_read_length = 100.0
+
     def test_sketch_paired(self):
         with get_path("k12.R1.fq.gz") as path:
             with gzip.open(path, "rt") as f:
