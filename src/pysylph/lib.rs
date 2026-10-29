@@ -633,6 +633,15 @@ impl SampleSketch {
         self.sketch.k
     }
 
+    /// `int`: The number of distinct k-mers in this sketch.
+    ///
+    /// This is equal to ``len(sketch.kmer_counts)``, but is computed without
+    /// building the `dict`.
+    #[getter]
+    pub fn n_kmers(&self) -> usize {
+        self.sketch.kmer_counts.len()
+    }
+
     /// `dict`: A counter of k-mers in this sketch.
     #[getter]
     pub fn kmer_counts<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, PyDict>> {

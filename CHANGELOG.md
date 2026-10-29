@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   sketch to and from `bytes`, in the same format as `.sylsp` files (so that
   `SampleSketch.load` and `SampleSketch.dump` can be used interchangeably).
 - `SampleSketch` objects can now be pickled.
+- `SampleSketch.n_kmers` to get the number of distinct k-mers of a sketch
+  without building the `dict` returned by `SampleSketch.kmer_counts`.
 - `Profiler` can be given several databases as positional arguments
   (`Profiler(db1, db2, ...)`, or `Profiler(*databases)` for a list), in any mix
   of `Database` and `TwoStageDatabase`, as in

@@ -27,6 +27,14 @@ class TestSampleSketchSerialization(unittest.TestCase):
         self.assertEqual(actual.c, expected.c)
         self.assertEqual(actual.kmer_counts, expected.kmer_counts)
 
+    def test_n_kmers(self):
+        for sketch in (self.sketch, self.paired):
+            with self.subTest(sketch=sketch):
+                self.assertGreater(sketch.n_kmers, 0)
+                self.assertEqual(sketch.n_kmers, len(sketch.kmer_counts))
+                copy = SampleSketch.from_bytes(sketch.to_bytes())
+                self.assertEqual(copy.n_kmers, len(sketch.kmer_counts))
+
     def test_to_bytes_matches_dump(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "k12.R1.sylsp")
