@@ -929,7 +929,7 @@ checksum = "73473c0e59e6d5812c5dfe2a064a6444949f089e20eec9a2e5506596494e4623"
 [[package]]
 name = "sylph"
 version = "1.0.0"
-source = "git+https://github.com/MrTomRod/sylph?rev=4b5c2beb05312d9da9006529b12ad24ec47f0914#4b5c2beb05312d9da9006529b12ad24ec47f0914"
+source = "git+https://github.com/MrTomRod/sylph?rev=63b114dc9a268e92e7f6fd2b4639e49d07f99ff0#63b114dc9a268e92e7f6fd2b4639e49d07f99ff0"
 dependencies = [
  "bincode",
  "boomphf",

@@ -25,7 +25,6 @@ use pyo3::types::PyTuple;
 use pyo3::types::PyType;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use rayon::prelude::*;
 
 mod pyfile;
 
@@ -1504,97 +1503,11 @@ fn run_pipeline(
     sketches: &[Arc<sylph::types::GenomeSketch>],
     sample: &sylph::types::SequencesSketch,
 ) -> Vec<Hit> {
-    // estimate sample kmer identity (seq_id is a percentage, as in sylph)
-    let kmer_id_opt = if let Some(x) = args.seq_id {
-        Some((x / 100.0).powf(sample.k as f64))
-    } else {
-        sylph::contain::get_kmer_identity(sample, args.estimate_unknown)
-    };
-
-    // extract all matching kmers
-    let mut stats = sketches
-        .par_iter()
-        .flat_map_iter(|sketch| sylph::contain::get_stats(args, sketch, sample, None, false))
+    let genome_refs = sketches
+        .iter()
+        .map(|sketch| sketch.as_ref())
         .collect::<Vec<_>>();
-
-    // estimate true coverage
-    sylph::contain::estimate_true_cov(
-        &mut stats,
-        kmer_id_opt,
-        args.estimate_unknown,
-        sample.mean_read_length,
-        sample.k,
-    );
-
-    if args.pseudotax {
-        // reassign k-mers
-        let winner_map = sylph::contain::winner_table(&stats, false);
-        let remaining_stats = stats
-            .iter()
-            .map(|x| x.genome_sketch)
-            .flat_map(|genome_sketch| {
-                sylph::contain::get_stats(args, genome_sketch, sample, Some(&winner_map), false)
-            })
-            .collect();
-        stats = sylph::contain::derep_if_reassign_threshold(
-            &stats,
-            remaining_stats,
-            args.redundant_ani,
-            sample.k,
-        );
-        sylph::contain::estimate_true_cov(
-            &mut stats,
-            kmer_id_opt,
-            args.estimate_unknown,
-            sample.mean_read_length,
-            sample.k,
-        );
-
-        // estimate unknown if needed
-        let mut bases_explained = 1.;
-        if args.estimate_unknown {
-            bases_explained = sylph::contain::estimate_covered_bases(
-                &stats,
-                sample,
-                sample.mean_read_length,
-                sample.k,
-            );
-        }
-
-        // compute coverage and relative abundances
-        let total_cov = stats.iter().map(|x| x.final_est_cov).sum::<f64>();
-        let total_seq_cov = stats
-            .iter()
-            .map(|x| x.final_est_cov * x.genome_sketch.gn_size as f64)
-            .sum::<f64>();
-        for result in stats.iter_mut() {
-            result.rel_abund = Some(result.final_est_cov / total_cov * 100.0);
-            result.seq_abund = Some(if args.estimate_read_counts {
-                // `sylph --estimate-read-counts`: the sequence abundance
-                // column holds the estimated number of reads instead of a
-                // relative abundance
-                (result.final_est_cov * result.genome_sketch.gn_size as f64
-                    / sample.mean_read_length
-                    * bases_explained)
-                    .round()
-            } else {
-                result.final_est_cov * result.genome_sketch.gn_size as f64 / total_seq_cov
-                    * 100.0
-                    * bases_explained
-            });
-        }
-
-        // sort by relative abundance
-        stats.sort_by(|x, y| {
-            y.rel_abund
-                .unwrap()
-                .partial_cmp(&x.rel_abund.unwrap())
-                .unwrap()
-        });
-    } else {
-        // sort by ANI
-        stats.sort_by(|x, y| y.final_est_ani.partial_cmp(&x.final_est_ani).unwrap());
-    }
+    let stats = sylph::contain::profile_sample(args, &genome_refs, sample);
 
     // take ownership of the results
     let genomes = sketches

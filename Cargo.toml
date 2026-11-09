@@ -31,8 +31,8 @@ version = "1.0"
 [dependencies.sylph]
 version = "1.0.0"
 git = "https://github.com/MrTomRod/sylph"
-# branch expose-library-api (sylph PR #93)
-rev = "4b5c2beb05312d9da9006529b12ad24ec47f0914"
+# branch profile-sample-api (sylph PR #93 follow-up)
+rev = "63b114dc9a268e92e7f6fd2b4639e49d07f99ff0"
 # path = "vendor/sylph"
 
 [features]
